@@ -1449,6 +1449,75 @@ knowledge:
     attachments in front of the Executive under "From your company documents",
     and it is why isolation belongs in the collection, never in a domain
     value.
+  pdf_reading: |
+    Scanned / image-only PDFs (no text layer) are read, not returned empty.
+    knowledge.pdf_reader.read_pdf_text tries, in order, and never raises:
+    1. pypdf's text layer — kept when it has >= ~20 visible chars per page.
+    2. Claude: base64 `document` blocks, PDF_VISION_PAGES_PER_CALL pages
+       (default 20) per request, 3 concurrent, transcribed to Markdown by
+       PDF_VISION_MODEL (default claude-sonnet-5). ONLY when that model
+       resolves to AnthropicProvider — providers/translator.py drops
+       `document` (and `image`) blocks on OpenRouter / local routes, so the
+       PDF would be silently lost there.
+    3. Local OCR: pypdfium2 renders each page (scale 2), RapidOCR
+       (rapidocr-onnxruntime, models bundled in the wheel; opencv-python is
+       overridden to opencv-python-headless in pyproject so python:3.11-slim
+       needs no libGL) reads it. Offline, no key, every provider; also the
+       fallback when step 2 errors, refuses or returns nothing.
+       PDF_OCR_ENABLED=false turns it off. Not installed on Python >= 3.13
+       (the wheel's cap) — the note then says OCR is not installed.
+    PDF_VISION_MAX_PAGES (default 100) caps pages read (note says so).
+    inbound=True (a file a channel delivered: chat/Slack/Google Chat/email
+    attachments; NOT POST /chat/upload, the signed-in user's own) caps at
+    PDF_INBOUND_MAX_PAGES (30) and draws on a rolling hourly budget,
+    PDF_INBOUND_PAGES_PER_HOUR (300), shared by all senders — a spent budget
+    returns a note, not a conversion. Text layers are never metered.
+    OCR bounds (security review): each page renders within a 25 MP pixel
+    budget (scale lowered for a huge MediaBox — a 20000pt page would be a
+    multi-GB bitmap), at most 2 documents OCR at once (BoundedSemaphore),
+    and each stops after 240 s with the pages it has.
+    _MAX_PDF_PAGES (2000) is checked before the text-layer pass extracts any
+    page (PdfTooLarge -> "none" with a note): the page caps bound conversion
+    only, and a crafted many-thousand-page tree would otherwise be walked.
+    A vision slice answering stop_reason=max_tokens is split in half and
+    re-requested until each part fits (depth <= log2 pages-per-call); a
+    single page still cut off keeps its text + "[transcription cut off
+    here]" and the note says so — never returned as complete.
+    Results are cached in process by sha256 (32 entries); failures are not.
+    loader.read_document_text / extract_text_from_file_async are the async
+    entry points; ingest_file (uploads, reconcile_company_docs), the
+    /documents/{filename} preview, intake uploads, integrations.attachments,
+    the email poller, oe__read_file and read_document all use them. The sync
+    extract_text_from_file is unchanged for its other callers.
+
+    Where files reach the Executive:
+    - web chat / Discord / Telegram / Slack / Google Chat —
+      integrations.attachments (inlined under `[Attached: <name>]`, label
+      adds "(converted from scanned pages)"). Slack lets `file_share`
+      through, downloads after the roster + response gates, sends the bot
+      token only to https://files.slack.com/ (needs `files:read`). Google
+      Chat downloads uploaded content via media.download with the chat.bot
+      credentials (5/message, 20 MB checked per chunk), only when the
+      event's user.email is on the People roster — the webhook
+      authenticates Google, not the sender, so anyone else's files are
+      named, never downloaded; a driveDataRef attachment is left to the
+      Drive tools with its id.
+    - email — integrations.email_attachments: for a known sender (team,
+      contact, principal) the poller calls get_gmail_attachment_content for
+      up to 5 readable attachments of THIS message (20 MB each); workspace-
+      mcp in stdio mode answers "Saved to: <path>" — taken only from a line
+      it starts, the LAST one, and only if its name equals the "Saved
+      filename:" line (the answer echoes the sender-chosen filename first,
+      which could carry a fake "Saved to:") — which must then pass
+      tool_catalog.resolve_readable_file; text appended to the turn under
+      "--- ATTACHMENT TEXT ---" (15k chars each). Outside the model loop, so
+      it works on private turns without widening PRIVATE_TURN_MCP_TOOLS.
+      An unknown sender's attachments stay a list (no downloads).
+    - anything else — the chat tool `read_document`
+      (orchestrator.document_tools): `path` (a file another tool saved,
+      e.g. get_drive_file_download_url for a scanned Drive PDF) or company
+      doc `filename`, optional PDF `pages`. Confined to the tool download
+      dirs + company docs dir; withheld on private turns.
 
 memory:
   episodic_db: ./episodic_memory.db
