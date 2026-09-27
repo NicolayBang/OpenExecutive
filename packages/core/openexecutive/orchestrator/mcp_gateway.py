@@ -3,16 +3,19 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import html
 import json
 import logging
 import os
 import re
+import unicodedata
 from collections.abc import Iterator
 from email.utils import getaddresses
 from pathlib import Path
 from typing import Any
 
 from openexecutive.config import get_settings, mcp_config_file_present
+from openexecutive.utils.html_tags import strip_tags
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +120,116 @@ _GATED_DRIVE_TOOLS = frozenset({
     "google_workspace__manage_drive_access",
     "google_workspace__set_drive_file_permissions",
 })
+
+# Apps Script tools run code as the Executive's Google account, outside every
+# gate in this module: the code can mail anyone, read or share all of Drive
+# and Gmail, and (manage_script_trigger, workspace-mcp 1.29.0) keep running
+# after the turn ends. OE never calls them, so every one is refused. The set
+# holds the 1.29.0 names and the 1.21.1 names they replaced; the name-pattern
+# fallback in `_is_apps_script_tool` keeps a rename from reopening the path.
+_BLOCKED_APPS_SCRIPT_TOOLS = frozenset({
+    # 1.29.0
+    "google_workspace__generate_trigger_code",
+    "google_workspace__get_script_activity",
+    "google_workspace__get_script_project",
+    "google_workspace__get_script_version",
+    "google_workspace__list_script_deployments",
+    "google_workspace__manage_deployment",
+    "google_workspace__manage_script_content",
+    "google_workspace__manage_script_project",
+    "google_workspace__manage_script_trigger",
+    "google_workspace__manage_script_version",
+    "google_workspace__run_script_function",
+    # 1.21.1
+    "google_workspace__create_script_project",
+    "google_workspace__create_version",
+    "google_workspace__delete_script_project",
+    "google_workspace__get_script_content",
+    "google_workspace__get_script_metrics",
+    "google_workspace__get_version",
+    "google_workspace__list_deployments",
+    "google_workspace__list_script_processes",
+    "google_workspace__list_script_projects",
+    "google_workspace__list_versions",
+    "google_workspace__update_script_content",
+})
+
+# Arguments that make workspace-mcp fetch a URL the model chose. Its SSRF guard
+# blocks internal hosts only, so a public URL is an exfiltration channel:
+# whatever the model puts in the query string leaves the box when the fetch
+# runs — before any recipient gate matters (a send to the Executive's own
+# address is always allowed). `create_drive_file.fileUrl` also takes file://,
+# i.e. reads a local file into Drive. Attachments still reach mail as `path`,
+# `content` or an `artifact_id`; Drive files as `content` / `base64_content`.
+_URL_FETCH_ARGS: dict[str, frozenset[str]] = {
+    "google_workspace__create_drive_file": frozenset({"fileUrl"}),
+    "google_workspace__update_drive_file": frozenset({"file_url"}),
+    "google_workspace__import_to_google_doc": frozenset({"file_url"}),
+    "google_workspace__import_to_google_sheets": frozenset({"file_url"}),
+    "google_workspace__import_to_google_slides": frozenset({"file_url"}),
+}
+# Normalized (lowercased, alphanumerics only) argument keys refused on EVERY
+# Google Workspace tool and inside every attachment entry, so a renamed or new
+# fetch argument fails closed. `urls` (a contact's websites) is not one.
+_URL_FETCH_KEYS = frozenset({"url", "fileurl", "sourceurl", "remoteurl", "downloadurl"})
+# Keys Google itself fetches, at any depth: insert_doc_image.image_source,
+# Slides createImage.url / replaceImage.url / imageUrl and a page background's
+# stretchedPictureFill.contentUrl, Forms image.sourceUri, Docs image_uri. The
+# query string still lands on the attacker's host. Rather than name them, any
+# key ending in url / uri (or image_source) whose value has a URL scheme is
+# refused; a Drive file id (no scheme) passes. The named exceptions are stored
+# as text, never fetched: a document hyperlink, a meeting link, a YouTube id.
+_GOOGLE_FETCH_KEY_RE = re.compile(r"(url|uri|imagesource)$")
+_STORED_URL_KEYS = frozenset({"linkurl", "conferenceuri", "youtubeuri"})
+_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
+# What a URL parser strips or ignores before the scheme (C0 controls, space,
+# DEL, zero-width and bidi format characters, BOM) — removed before the scheme
+# test so "\x01https://…" or "\u200bhttps://…" is still a URL here.
+_INVISIBLE_RE = re.compile(r"[\x00-\x20\x7f\u200b-\u200f\u2028-\u202f\u2060-\u206f\ufeff]")
+# Sheets functions Google evaluates by fetching a URL from the cell VALUE, so
+# no key names it. Matched anywhere in any string — a `values` argument may
+# arrive JSON-encoded, a CSV cell sits mid-line, "+IMPORTDATA(" needs no "=" —
+# on every tool that can write cells: the Sheets tools (sheet / table /
+# conditional formatting) and the Drive create / update / import tools, which
+# convert CSV into a native Sheet. Other formulas (=SUM(...)) pass, as does
+# the word without a call ("IMPORTDATA is a function").
+_FORMULA_FETCH_RE = re.compile(r"\b(IMPORTDATA|IMPORTXML|IMPORTHTML|IMPORTFEED|IMAGE)\s*\(", re.IGNORECASE)
+_CELL_WRITER_RE = re.compile(r"sheet|table|conditional|drive_file")
+# A converter decodes markup before it sees a formula, so text bound for a
+# Sheet is also scanned with CDATA markers, then tags and comments, removed
+# and character references decoded ("IMPORT<!---->DATA(", "IMPORT<b></b>DATA(",
+# "&#x49;MPORTDATA("). Tags go through utils.html_tags.strip_tags, a forward
+# scan: a regex over sender-shaped text with many "<" is quadratic.
+# What a converter might fold away before the formula is parsed: NUL and other
+# control characters (a UTF-16-shaped CSV), Unicode format characters (a soft
+# hyphen inside the name). Removed, after NFKC folding of full-width letters
+# and parentheses, for one more matching pass.
+_FOLDED_NOISE_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# A JSON-encoded string argument is json.loads'ed by the server, so a gate must
+# read what the server will read: "\u0049MPORTDATA(" is IMPORTDATA( once
+# decoded, and a `requests` list may arrive as one string. Strings up to this
+# size that parse to a list or object are walked as that value; a larger one
+# on a cell-writing tool is refused, since it cannot be read.
+_JSON_STRING_MAX = 2_000_000
+# Nesting deeper than any real argument. Every walk stops here and FAILS
+# CLOSED: `_nested_fetch_key` reports it as a hit, and `_iter_arg_strings`
+# yields this sentinel, which its consumers (the formula scan, the Drive share
+# scan) refuse — a payload buried past the cap is unread, and unread means
+# refused, never forwarded.
+_WALK_DEPTH_MAX = 32
+_TOO_DEEP = "<too-deep>"
+# An upload that becomes a native Sheet is evaluated by Google, and a binary
+# upload (XLSX, ODS, XLS) hides its formulas behind zip members, XML encodings
+# and character references — nothing a scan here can read reliably. So such an
+# upload may only be text `content`, which is scanned; base64_content and a
+# server-side file_path are refused for it. Every other upload (a PNG to
+# Drive, a DOCX to Docs) is left alone.
+_SHEET_MIME_RE = re.compile(r"spreadsheet|ms-?excel|openxmlformats.*sheet|opendocument\.spreadsheet|csv")
+# Free text Google mails to someone the roster never checked: an RSVP comment
+# goes to the event's organizer; an out-of-office / focus-time decline message
+# goes to whoever invites the Executive during the window. Refused on every
+# Google Workspace tool, whatever the spelling of the key.
+_MAILED_TEXT_KEYS = frozenset({"rsvpcomment", "declinemessage"})
 
 # Permission "type"/"scope" enum values that grant access to a population rather
 # than a single addressable person — i.e. public or whole-domain sharing. These
@@ -267,12 +380,13 @@ def _check_acting_account(tool: str, arguments: dict[str, Any]) -> str | None:
     possibly anyone's in the domain. Someone's own mailbox is reached only
     through ``delegation.gmail`` (Act as me), never through here. Absent
     means the server's own account and stays allowed."""
-    value = arguments.get("user_google_email")
-    if value is None:
+    values = [v for v in _arg_values(arguments, "user_google_email") if v is not None]
+    if not values:
         return None
     exec_address = get_settings().exec_email_address.strip().lower()
-    if isinstance(value, str) and value.strip().lower() == exec_address:
+    if all(isinstance(v, str) and v.strip().lower() == exec_address for v in values):
         return None
+    value = next(v for v in values if not (isinstance(v, str) and v.strip().lower() == exec_address))
     from openexecutive.audit import log_event as audit_log
 
     shown = (value if isinstance(value, str) else repr(value))[:200]
@@ -290,6 +404,291 @@ def _check_acting_account(tool: str, arguments: dict[str, Any]) -> str | None:
             "or use that address. Do not retry with another account."
         ),
     })
+
+
+def _refuse(tool: str, field: str, shown: str, *, reason: str) -> str:
+    """Refuse a Google Workspace call for a reason other than a recipient (a
+    blocked tool, a URL fetch, an RSVP comment). Audited like `_block`, with
+    ``shown`` in the row's address slot so /audit reads the same for every
+    refusal."""
+    from openexecutive.audit import log_event as audit_log
+
+    field = field[:200]
+    logger.warning("blocked google workspace call: tool=%s field=%s", tool, field)
+    audit_log(
+        "integration_outbound_blocked",
+        f"Blocked a Google Workspace call (tool={tool} field={field})",
+        actor="mcp_gateway",
+        details={"tool": tool, "field": field, "address": shown},
+    )
+    return json.dumps({"error": reason})
+
+
+def _norm_key(key: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", key.lower())
+
+
+# workspace-mcp 1.29.0 added CamelCaseArgumentsMiddleware (core/server.py): an
+# argument key that is not a declared parameter is renamed to its snake_case
+# form when that form is declared and absent. So `rsvpComment`, `Attendees` or
+# `userGoogleEmail` reach the tool as the real parameter — and a gate that
+# matched the exact key never saw them. Every gate therefore reads a parameter
+# through these, by normalized spelling, and a refusal fires on any variant.
+def _arg_values(arguments: dict[str, Any], name: str) -> list[Any]:
+    """Every value stored under ``name`` or a respelling of it."""
+    target = _norm_key(name)
+    return [v for k, v in arguments.items() if isinstance(k, str) and _norm_key(k) == target]
+
+
+def _arg(arguments: dict[str, Any], name: str) -> Any:
+    """The value under ``name`` — the exact key when present (the middleware
+    never overrides one), else the first respelling; None when absent."""
+    if name in arguments:
+        return arguments[name]
+    values = _arg_values(arguments, name)
+    return values[0] if values else None
+
+
+def _is_apps_script_tool(tool_name: object) -> bool:
+    """True for any Apps Script tool: the known names, or (fallback) any
+    Google Workspace tool whose name says script or deployment. No Gmail /
+    Calendar / Drive / Docs / Sheets tool does, and an over-match refuses,
+    so it fails closed."""
+    if not isinstance(tool_name, str):
+        return False
+    if tool_name in _BLOCKED_APPS_SCRIPT_TOOLS:
+        return True
+    if not tool_name.startswith(_GW_PREFIX):
+        return False
+    bare = tool_name[len(_GW_PREFIX):]
+    return "script" in bare or "deployment" in bare
+
+
+def _check_url_fetch(tool: str, arguments: dict[str, Any]) -> str | None:
+    """Return None unless a Google Workspace call asks the server to fetch a
+    URL (see `_URL_FETCH_ARGS`); else a JSON error. A key set to null / ""
+    fetches nothing and passes."""
+    named = _URL_FETCH_ARGS.get(tool, frozenset())
+    for key, value in arguments.items():
+        if not isinstance(key, str):
+            continue
+        # A gated Gmail tool's attachments have their own check, after the
+        # recipient gate, so a stranger is still refused as a stranger.
+        if tool in _GATED_GMAIL_TOOLS and _norm_key(key) == "attachments":
+            continue
+        if (key in named or _norm_key(key) in _URL_FETCH_KEYS) and value not in (None, ""):
+            return _refuse(
+                tool, key, "<url-fetch>",
+                reason=(
+                    f"argument {key!r} makes the server fetch a URL, which can "
+                    f"carry data out — refusing. Pass the content itself (or, "
+                    "for a Gmail attachment, a path or artifact_id) instead."
+                ),
+            )
+        if _google_fetches(key, value):
+            return _refuse(
+                tool, key, "<url-fetch>",
+                reason=(
+                    f"{key!r} names a URL for Google to fetch, which can carry "
+                    "data out — refusing. Use a Drive file id instead."
+                ),
+            )
+        nested = _nested_fetch_key(value)
+        if nested is not None:
+            return _refuse(
+                tool, f"{key}.{nested}", "<url-fetch>",
+                reason=(
+                    f"{nested!r} inside {key!r} names a URL to fetch (by the "
+                    "server or by Google), which can carry data out — refusing. "
+                    "Use a Drive file id or the content itself."
+                ),
+            )
+    return None
+
+
+def _is_url(value: Any) -> bool:
+    """True when ``value`` is a string a URL parser would fetch from: a scheme
+    ("https:", "data:", …) or a protocol-relative "//host", after the
+    characters such a parser strips are removed."""
+    if not isinstance(value, str):
+        return False
+    cleaned = _INVISIBLE_RE.sub("", value)
+    return cleaned.startswith("//") or _URL_SCHEME_RE.match(cleaned) is not None
+
+
+def _google_fetches(key: str, value: Any) -> bool:
+    """True when ``key`` is one Google fetches and ``value`` is a URL."""
+    norm = _norm_key(key)
+    if norm in _STORED_URL_KEYS or not _GOOGLE_FETCH_KEY_RE.search(norm):
+        return False
+    return _is_url(value)
+
+
+def _nested_fetch_key(value: Any, depth: int = 0) -> str | None:
+    """The first key below the top level that carries something to fetch: a
+    `_URL_FETCH_KEYS` key with any value, or a key Google fetches
+    (`_google_fetches`) whose value has a URL scheme. None when there is none."""
+    if depth > _WALK_DEPTH_MAX:
+        return _TOO_DEEP
+    if isinstance(value, str):
+        # A JSON-encoded `requests` list is walked as the list the server decodes.
+        parsed = _parsed_json(value)
+        return _nested_fetch_key(parsed, depth + 1) if parsed is not None else None
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(k, str):
+                if _norm_key(k) in _URL_FETCH_KEYS and v not in (None, ""):
+                    return k
+                if _google_fetches(k, v):
+                    return k
+            found = _nested_fetch_key(v, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            found = _nested_fetch_key(v, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _becomes_sheet(tool: str, arguments: dict[str, Any]) -> bool:
+    """True when an upload through ``tool`` is converted into a native Sheet:
+    the Sheets import, or a Drive create whose target type is a spreadsheet.
+    A Drive update's target is unknown here, so it counts too."""
+    bare = tool[len(_GW_PREFIX):] if tool.startswith(_GW_PREFIX) else tool
+    if bare in ("import_to_google_sheets", "update_drive_file"):
+        return True
+    if bare != "create_drive_file":
+        return False
+    for key, value in arguments.items():
+        if (
+            isinstance(key, str) and _norm_key(key) in ("mimetype", "contentmimetype")
+            and isinstance(value, str) and _SHEET_MIME_RE.search(value.lower())
+        ):
+            return True
+    return False
+
+
+def _formula_fetches(text: str) -> bool:
+    """True when ``text`` holds a fetching formula call, as written, with
+    character references decoded, or with markup removed first."""
+    if _FORMULA_FETCH_RE.search(text):
+        return True
+    decoded = html.unescape(text)
+    if _FORMULA_FETCH_RE.search(decoded):
+        return True
+    # CDATA markers first: to the tag strip, "<![CDATA[DATA]]>" is one tag.
+    stripped = html.unescape(strip_tags(text.replace("<![CDATA[", "").replace("]]>", "")))
+    if _FORMULA_FETCH_RE.search(stripped):
+        return True
+    folded = _FOLDED_NOISE_RE.sub("", unicodedata.normalize("NFKC", stripped))
+    folded = "".join(ch for ch in folded if unicodedata.category(ch) != "Cf")
+    return _FORMULA_FETCH_RE.search(folded) is not None
+
+
+def _check_sheet_formulas(tool: str, arguments: dict[str, Any]) -> str | None:
+    """Return None unless a cell-writing call carries a formula Google
+    evaluates by fetching a URL (`_FORMULA_FETCH_RE`), or an upload whose
+    formulas cannot be read from here; else a JSON error."""
+    bare = tool[len(_GW_PREFIX):] if tool.startswith(_GW_PREFIX) else tool
+    if not _CELL_WRITER_RE.search(bare):
+        return None
+    if _becomes_sheet(tool, arguments):
+        for key, value in arguments.items():
+            if not isinstance(key, str) or value in (None, ""):
+                continue
+            if _norm_key(key) in ("base64content", "filepath"):
+                return _refuse(
+                    tool, key, "<uninspected-file>",
+                    reason=(
+                        f"{key!r} would become a Google Sheet, and a binary or "
+                        "server-side file's formulas cannot be checked here — "
+                        "refusing. Pass the rows as text `content` (CSV) instead."
+                    ),
+                )
+    for text in _iter_arg_strings(arguments):
+        if text is _TOO_DEEP:
+            return _refuse(
+                tool, "values", "<unreadable>",
+                reason="an argument nested this deep cannot be checked — refusing. Flatten it.",
+            )
+        if len(text) > _JSON_STRING_MAX and text.lstrip()[:1] in ("[", "{"):
+            return _refuse(
+                tool, "values", "<unreadable>",
+                reason="a JSON-encoded argument this large cannot be checked — refusing. Send fewer rows per call.",
+            )
+        if _formula_fetches(text):
+            return _refuse(
+                tool, "values", "<url-fetch>",
+                reason=(
+                    "a formula that fetches a URL (IMPORTDATA / IMPORTXML / "
+                    "IMPORTHTML / IMPORTFEED / IMAGE) would make Google carry data "
+                    "out — refusing. Write the value itself instead."
+                ),
+            )
+    return None
+
+
+def _check_mailed_text(tool: str, arguments: dict[str, Any]) -> str | None:
+    """Return None unless the call carries text Google would mail to someone
+    the roster never checked (`_MAILED_TEXT_KEYS`); else a JSON error."""
+    for key, value in arguments.items():
+        if isinstance(key, str) and _norm_key(key) in _MAILED_TEXT_KEYS and value not in (None, ""):
+            return _refuse(
+                tool, key, "<unchecked-recipient>",
+                reason=(
+                    f"{key!r} is mailed by Google to a person the People roster "
+                    "never checked (an event's organizer, whoever sends an "
+                    "invitation) — refusing. Leave it out."
+                ),
+            )
+    return None
+
+
+def _attachment_fetches_url(attachments: Any) -> bool:
+    """True when a Gmail ``attachments`` argument asks workspace-mcp to fetch
+    a URL for any entry. Unknown shapes count as fetching (fail closed);
+    ``artifact_id`` entries and path / content entries do not."""
+    if attachments is None:
+        return False
+    if isinstance(attachments, str):
+        try:
+            attachments = json.loads(attachments)
+        except RecursionError:
+            return True
+        except ValueError:
+            return "://" in attachments or re.search(r"\burl\b", attachments, re.I) is not None
+    if isinstance(attachments, dict):
+        attachments = [attachments]
+    if not isinstance(attachments, list):
+        return True
+    for entry in attachments:
+        if isinstance(entry, dict):
+            # Any depth, like every other Workspace argument: a url under
+            # `metadata` is still a url, and past the depth cap it is refused.
+            if _nested_fetch_key(entry) is not None:
+                return True
+        elif isinstance(entry, str):
+            if "://" in entry:
+                return True
+        else:
+            return True
+    return False
+
+
+def _check_attachment_urls(tool: str, arguments: dict[str, Any]) -> str | None:
+    """Return None unless a gated Gmail call attaches by URL; else a JSON error."""
+    if not _attachment_fetches_url(arguments.get("attachments")):
+        return None
+    return _refuse(
+        tool, "attachments", "<url-fetch>",
+        reason=(
+            "an attachment given as a URL makes the server fetch it, which can "
+            "carry data out — refusing to send. Attach by path, by content, or "
+            "by artifact_id instead."
+        ),
+    )
 
 
 def _roster_allow_set() -> set[str]:
@@ -555,25 +954,33 @@ def _check_calendar_attendees(tool: str, arguments: dict[str, Any]) -> str | Non
     required by manage_event and validated by the typed tool; its absence in
     a raw call is handled below by the attendees check path.
     """
-    action = arguments.get("action", "")
+    # rsvp_comment (text mailed to the organizer) is refused for every tool by
+    # _check_mailed_text, before this gate runs.
+    # Action is matched as the server matches it (case- and space-insensitive),
+    # so a "Delete" is a delete here too rather than a stricter accident.
+    action = str(_arg(arguments, "action") or "").strip().lower()
     if action in ("delete", "rsvp"):
         return None
 
-    attendees = arguments.get("attendees")
+    # Every spelling of `attendees` is read: the server renames `Attendees`
+    # to the real parameter, so a variant is as good as the exact key.
     # None = no attendees field at all → pass through (e.g. organizer-only event).
     # Empty list [] = explicitly supplied with no names → also pass through;
     # the typed create_calendar_event tool always supplies at least one attendee,
     # and a raw call with [] creates an organizer-only event (no roster leak).
     # Any non-empty list → every address must be roster-validated.
-    if attendees is None:
+    supplied = [v for v in _arg_values(arguments, "attendees") if v is not None]
+    if not supplied:
         return None
-    if isinstance(attendees, list) and len(attendees) == 0:
+    if all(isinstance(v, list) and len(v) == 0 for v in supplied):
         return None
 
     allow = _roster_allow_set()
 
     # attendees may be a list of strings (emails) or dicts with an "email" key.
-    items = attendees if isinstance(attendees, list) else [attendees]
+    items: list[Any] = []
+    for attendees in supplied:
+        items.extend(attendees if isinstance(attendees, list) else [attendees])
     for item in items:
         if isinstance(item, dict):
             email = item.get("email", "")
@@ -592,7 +999,49 @@ def _check_calendar_attendees(tool: str, arguments: dict[str, Any]) -> str | Non
     return None
 
 
-def _iter_arg_strings(value: Any) -> Iterator[str]:
+def _pin_calendar_notifications(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Keep a manage_event call that named no attendees from emailing the
+    event's existing guests.
+
+    The attendee gate checks only the ``attendees`` argument. An update that
+    leaves it out keeps the event's current guest list — which may hold
+    people off the roster — and Google mails every guest the new title,
+    description or time unless ``send_updates`` is "none". So such a call is
+    forced to "none": the change lands on the calendar and nobody is emailed
+    text the gate never saw. A call that passes attendees had them checked
+    and keeps its own ``send_updates``; delete and rsvp carry no new text; a
+    create without attendees has nobody to mail, so the pin is moot there.
+    """
+    action = str(_arg(arguments, "action") or "").strip().lower()
+    if action in ("delete", "rsvp"):
+        return arguments
+    supplied = [v for v in _arg_values(arguments, "attendees") if v is not None]
+    if any(not (isinstance(v, list) and not v) for v in supplied):
+        return arguments
+    if _arg_values(arguments, "send_updates") == ["none"]:
+        return arguments
+    logger.info("manage_event without attendees: send_updates pinned to none")
+    # Every spelling goes, so no `sendUpdates: "all"` survives beside the pin.
+    pinned = {k: v for k, v in arguments.items()
+              if not (isinstance(k, str) and _norm_key(k) == "sendupdates")}
+    pinned["send_updates"] = "none"
+    return pinned
+
+
+def _parsed_json(text: str) -> dict[str, Any] | list[Any] | None:
+    """The list or object a string argument encodes, else None. The server
+    json.loads such a string, so a gate reads it the same way."""
+    head = text.lstrip()[:1]
+    if head not in ("[", "{") or len(text) > _JSON_STRING_MAX:
+        return None
+    try:
+        parsed = json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+    return parsed if isinstance(parsed, (dict, list)) else None
+
+
+def _iter_arg_strings(value: Any, depth: int = 0) -> Iterator[str]:
     """Yield every string anywhere in a (possibly nested) argument value.
 
     Drive-share tool schemas vary across workspace-mcp versions and a grantee
@@ -600,18 +1049,27 @@ def _iter_arg_strings(value: Any) -> Iterator[str]:
     or even a dict *key* (e.g. an email-keyed permission map). Walking every
     string in both key and value position — rather than trusting a fixed set of
     field names — keeps the gate fail-closed against an email smuggled through an
-    unexpected shape.
+    unexpected shape. A string that encodes JSON is also walked as the value it
+    encodes, which is what the server sees after json.loads. Past
+    `_WALK_DEPTH_MAX` it yields `_TOO_DEEP` once instead of going silent, so a
+    consumer refuses what it could not read.
     """
+    if depth > _WALK_DEPTH_MAX:
+        yield _TOO_DEEP
+        return
     if isinstance(value, str):
         yield value
+        parsed = _parsed_json(value)
+        if parsed is not None:
+            yield from _iter_arg_strings(parsed, depth + 1)
     elif isinstance(value, dict):
         for k, v in value.items():
             if isinstance(k, str):
                 yield k
-            yield from _iter_arg_strings(v)
+            yield from _iter_arg_strings(v, depth + 1)
     elif isinstance(value, (list, tuple)):
         for v in value:
-            yield from _iter_arg_strings(v)
+            yield from _iter_arg_strings(v, depth + 1)
 
 
 def _is_truthy_public(value: Any) -> bool:
@@ -692,6 +1150,16 @@ def _check_drive_share(tool: str, arguments: dict[str, Any]) -> str | None:
         )
 
     for s in _iter_arg_strings(arguments):
+
+        if s is _TOO_DEEP:
+
+            return _refuse(
+
+                tool, "share", "<unreadable>",
+
+                reason="a share argument nested this deep cannot be checked — refusing. Flatten it.",
+
+            )
         if _norm_share_token(s) in _PUBLIC_SHARE_SCOPES:
             return _block(
                 "scope", s.strip(), tool,
@@ -941,18 +1409,45 @@ class MCPGateway:
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, RecursionError):
                 logger.warning("call_tool: arguments was a string but not valid JSON — using empty dict")
                 arguments = {}
         tool_name = tool_input.get("name", "")
         attached_artifacts: list[str] = []
         # Every Google Workspace call acts as the Executive's own account.
-        if isinstance(tool_name, str) and tool_name.startswith(_GW_PREFIX) and isinstance(arguments, dict):
+        if _is_apps_script_tool(tool_name):
+            return _refuse(
+                tool_name, "tool", "<apps-script>",
+                reason=(
+                    f"{tool_name} is not available: Apps Script runs code as "
+                    "the Executive's Google account outside the outbound "
+                    "gates. Do not retry with another script tool."
+                ),
+            )
+        if isinstance(tool_name, str) and tool_name.startswith(_GW_PREFIX):
+            # Every gate below reads a dict; anything else would skip them all.
+            if not isinstance(arguments, dict):
+                return _refuse(
+                    tool_name, "arguments", "<non-object>",
+                    reason="arguments must be a JSON object — refusing.",
+                )
             blocked = _check_acting_account(tool_name, arguments)
+            if blocked is not None:
+                return blocked
+            blocked = _check_url_fetch(tool_name, arguments)
+            if blocked is not None:
+                return blocked
+            blocked = _check_mailed_text(tool_name, arguments)
+            if blocked is not None:
+                return blocked
+            blocked = _check_sheet_formulas(tool_name, arguments)
             if blocked is not None:
                 return blocked
         if tool_name in _GATED_GMAIL_TOOLS:
             blocked = _check_gmail_recipients(tool_name, arguments)
+            if blocked is not None:
+                return blocked
+            blocked = _check_attachment_urls(tool_name, arguments)
             if blocked is not None:
                 return blocked
             # Only after the recipients pass: render any artifact the model
@@ -965,6 +1460,7 @@ class MCPGateway:
             blocked = _check_calendar_attendees(tool_name, arguments)
             if blocked is not None:
                 return blocked
+            arguments = _pin_calendar_notifications(arguments)
         if _is_drive_share_tool(tool_name):
             blocked = _check_drive_share(tool_name, arguments)
             if blocked is not None:
