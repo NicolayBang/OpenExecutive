@@ -204,7 +204,7 @@ def _record_usage(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     return recorded
 
 
-async def test_every_slice_sent_to_claude_records_its_usage(monkeypatch):
+async def test_every_slice_sent_to_the_model_records_its_usage(monkeypatch):
     # Token usage and the monthly AI limit count scanned PDFs like any call.
     recorded = _record_usage(monkeypatch)
     monkeypatch.setenv("PDF_VISION_PAGES_PER_CALL", "20")
