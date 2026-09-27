@@ -188,6 +188,42 @@ async def test_long_scan_is_sent_in_slices_and_joined_in_order(monkeypatch):
     assert sorted(_pages_in(c) for c in provider.calls) == [5, 20, 20]
 
 
+def _record_usage(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    recorded: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "openexecutive.audit.usage.log_model_usage",
+        lambda message, **kw: recorded.append(kw),
+    )
+    return recorded
+
+
+async def test_every_slice_sent_to_claude_records_its_usage(monkeypatch):
+    # Token usage and the monthly AI limit count scanned PDFs like any call.
+    recorded = _record_usage(monkeypatch)
+    monkeypatch.setenv("PDF_VISION_PAGES_PER_CALL", "20")
+    provider = _FakeProvider(reply="part")
+    _use_provider(monkeypatch, provider)
+
+    await read_pdf_text(_blank_pdf(45), filename="scan.pdf")
+
+    assert len(recorded) == len(provider.calls) == 3
+    assert {r["actor"] for r in recorded} == {"pdf_reader"}
+    assert {r["model"] for r in recorded} == {c["model"] for c in provider.calls}
+
+
+@pytest.mark.parametrize("provider", [_FakeProvider(stop_reason="refusal"), _FakeProvider(reply="")],
+                         ids=["refusal", "empty"])
+async def test_a_refused_or_empty_transcription_is_still_recorded(monkeypatch, provider):
+    recorded = _record_usage(monkeypatch)
+    _use_provider(monkeypatch, provider)
+    _stub_ocr(monkeypatch)
+
+    result = await read_pdf_text(_blank_pdf(), filename="scan.pdf")
+
+    assert result.method == "ocr"
+    assert len(recorded) == len(provider.calls) == 1
+
+
 async def test_pages_past_the_cap_are_skipped_with_a_note(monkeypatch):
     monkeypatch.setenv("PDF_VISION_MAX_PAGES", "10")
     provider = _FakeProvider()
