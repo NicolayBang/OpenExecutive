@@ -1449,6 +1449,75 @@ knowledge:
     attachments in front of the Executive under "From your company documents",
     and it is why isolation belongs in the collection, never in a domain
     value.
+  pdf_reading: |
+    Scanned / image-only PDFs (no text layer) are read, not returned empty.
+    knowledge.pdf_reader.read_pdf_text tries, in order, and never raises:
+    1. pypdf's text layer — kept when it has >= ~20 visible chars per page.
+    2. Claude: base64 `document` blocks, PDF_VISION_PAGES_PER_CALL pages
+       (default 20) per request, 3 concurrent, transcribed to Markdown by
+       PDF_VISION_MODEL (default claude-sonnet-5). ONLY when that model
+       resolves to AnthropicProvider — providers/translator.py drops
+       `document` (and `image`) blocks on OpenRouter / local routes, so the
+       PDF would be silently lost there.
+    3. Local OCR: pypdfium2 renders each page (scale 2), RapidOCR
+       (rapidocr-onnxruntime, models bundled in the wheel; opencv-python is
+       overridden to opencv-python-headless in pyproject so python:3.11-slim
+       needs no libGL) reads it. Offline, no key, every provider; also the
+       fallback when step 2 errors, refuses or returns nothing.
+       PDF_OCR_ENABLED=false turns it off. Not installed on Python >= 3.13
+       (the wheel's cap) — the note then says OCR is not installed.
+    PDF_VISION_MAX_PAGES (default 100) caps pages read (note says so).
+    inbound=True (a file a channel delivered: chat/Slack/Google Chat/email
+    attachments; NOT POST /chat/upload, the signed-in user's own) caps at
+    PDF_INBOUND_MAX_PAGES (30) and draws on a rolling hourly budget,
+    PDF_INBOUND_PAGES_PER_HOUR (300), shared by all senders — a spent budget
+    returns a note, not a conversion. Text layers are never metered.
+    OCR bounds (security review): each page renders within a 25 MP pixel
+    budget (scale lowered for a huge MediaBox — a 20000pt page would be a
+    multi-GB bitmap), at most 2 documents OCR at once (BoundedSemaphore),
+    and each stops after 240 s with the pages it has.
+    _MAX_PDF_PAGES (2000) is checked before the text-layer pass extracts any
+    page (PdfTooLarge -> "none" with a note): the page caps bound conversion
+    only, and a crafted many-thousand-page tree would otherwise be walked.
+    A vision slice answering stop_reason=max_tokens is split in half and
+    re-requested until each part fits (depth <= log2 pages-per-call); a
+    single page still cut off keeps its text + "[transcription cut off
+    here]" and the note says so — never returned as complete.
+    Results are cached in process by sha256 (32 entries); failures are not.
+    loader.read_document_text / extract_text_from_file_async are the async
+    entry points; ingest_file (uploads, reconcile_company_docs), the
+    /documents/{filename} preview, intake uploads, integrations.attachments,
+    the email poller, oe__read_file and read_document all use them. The sync
+    extract_text_from_file is unchanged for its other callers.
+
+    Where files reach the Executive:
+    - web chat / Discord / Telegram / Slack / Google Chat —
+      integrations.attachments (inlined under `[Attached: <name>]`, label
+      adds "(converted from scanned pages)"). Slack lets `file_share`
+      through, downloads after the roster + response gates, sends the bot
+      token only to https://files.slack.com/ (needs `files:read`). Google
+      Chat downloads uploaded content via media.download with the chat.bot
+      credentials (5/message, 20 MB checked per chunk), only when the
+      event's user.email is on the People roster — the webhook
+      authenticates Google, not the sender, so anyone else's files are
+      named, never downloaded; a driveDataRef attachment is left to the
+      Drive tools with its id.
+    - email — integrations.email_attachments: for a known sender (team,
+      contact, principal) the poller calls get_gmail_attachment_content for
+      up to 5 readable attachments of THIS message (20 MB each); workspace-
+      mcp in stdio mode answers "Saved to: <path>" — taken only from a line
+      it starts, the LAST one, and only if its name equals the "Saved
+      filename:" line (the answer echoes the sender-chosen filename first,
+      which could carry a fake "Saved to:") — which must then pass
+      tool_catalog.resolve_readable_file; text appended to the turn under
+      "--- ATTACHMENT TEXT ---" (15k chars each). Outside the model loop, so
+      it works on private turns without widening PRIVATE_TURN_MCP_TOOLS.
+      An unknown sender's attachments stay a list (no downloads).
+    - anything else — the chat tool `read_document`
+      (orchestrator.document_tools): `path` (a file another tool saved,
+      e.g. get_drive_file_download_url for a scanned Drive PDF) or company
+      doc `filename`, optional PDF `pages`. Confined to the tool download
+      dirs + company docs dir; withheld on private turns.
 
 memory:
   episodic_db: ./episodic_memory.db
@@ -3916,7 +3985,7 @@ external_monitoring:
       - "stock — Yahoo Finance Chart endpoint (the same endpoint yfinance scrapes, used directly via httpx to avoid pandas/numpy). Watchlist `target` is the ticker; signals fire when |intraday vs previous close| ≥ `trigger.abs_change_pct_gte` (default 5%). Severity hint scales with the magnitude of the move (≥10% URGENT, ≥5% HIGH, ≥2% MEDIUM, else LOW). v2 candidate: swap behind the same Source interface for a paid Alpha Vantage / Finnhub feed if Yahoo brittleness bites."
       - "query — standing web-search query. Watchlist `target` is a natural-language query (e.g. 'Acme Corp layoffs OR restructuring OR funding'); each poll runs it through `BaseAgent.analyze_with_tools` with the web_search tool (model pinned to `get_research_model()`, honouring an OpenRouter Council override — the provider layer translates native web_search into OpenRouter's `plugins:[{id:web}]`, see providers/translator). The model reports distinct results via the `emit_query_results` tool; each result with a valid clickable URL becomes a Signal (the adapter emits a flat severity hint LOW because it can't judge materiality per-hit — the pipeline regrades this from the capture-time relevance read BEFORE the floor gate via `_grade_query_severity`, so a material hit clears a medium/high floor instead of being suppressed; dedup key `query:` + first 32 hex chars of sha256(slug + NUL + canonical_url); URL-less results dropped to uphold the provenance invariant). UNLIKE the keyless feed adapters this source is BILLED (one LLM call + web searches per poll), so it polls slowly (default 360 min), is bounded by `web_search_max_uses` + per-row `config.max_results` (default 5, ceiling 10), and has its own kill switch `EXTERNAL_MONITOR_QUERY_ENABLED`. Optional `trigger.keywords` filters like rss; `config.allowed_domains`/`blocked_domains` are best-effort prompt hints only (NOT enforced, and not honoured by the OpenRouter web plugin). This is the 'watch arbitrary conditions' primitive that no feed publishes."
       - "edgar — SEC EDGAR filings. Watchlist `target` is a ticker (e.g. 'AAPL') or CIK; polls SEC's browse-edgar Atom feed (`/cgi-bin/browse-edgar?action=getcompany&CIK=…&output=atom`, whose CIK param resolves a ticker server-side, so no ticker→CIK table is shipped), parsed with feedparser. Emits one Signal per new filing whose form is in the filter (`trigger.forms`, default {8-K, 10-K, 10-Q}; amendments like 8-K/A match their base form). Dedup on the filing's accession number (globally unique — the cleanest natural key of any source). Provenance is the filing-index URL. Severity hint: 8-K HIGH (material-event report), 10-K/10-Q MEDIUM, else LOW. Keyless, but SEC's fair-access policy requires a descriptive User-Agent with a contact — sent via the EDGAR_USER_AGENT setting (operators should override the default with a real contact). Reuses fetch_bounded (now with a per-call user_agent override), validate_target_url, and the standard dedup/Signal pattern. The entry's <updated> lands on Signal.published_at and the adapter declares `seed_on_first_poll`, so a new watch baselines past filings instead of replaying them and filings older than EXTERNAL_MONITOR_MAX_SIGNAL_AGE_DAYS are `suppressed_stale`."
-      - "page_watch — generic web-page change detection for feed-less pages (pricing, careers, leadership, ToS). Watchlist `target` is the page URL. STATEFUL (the first stateful adapter): each poll fetches the page (bounded, SSRF-guarded), reduces it to normalized visible text (drops script/style/comments/tags, unescapes entities, collapses whitespace — so markup/layout churn doesn't register), hashes the FULL normalized text (so a change anywhere registers — no length blind spot), and compares to the last-seen hash in `page_watch_state`. First observation stores a baseline and emits NOTHING; an unchanged page emits nothing; a changed page emits ONE Signal carrying a difflib-based change summary (~N% differs + the added text; the diff/snapshot are length-capped but detection is not) and updates the baseline. Severity hint LOW (page diffs are noisy — enrichment + severity_floor filter). Dedup key folds slug + UTC date + content hash (mirrors stock — a state seen again on a later day re-alerts; same-day repeats dedup). Optional `trigger.keywords` only surfaces a change when the change itself (summary + added text) matches. Reads/writes its state via the db_path threaded through Source.poll. The keyless httpx fetcher is the only fetch path. A row written before the xcrawl scrape path was removed still carries `config.fetch = \"xcrawl\"` (PAGE_WATCH_FETCH_LEGACY_XCRAWL) and a baseline hashed from scraped markdown; the adapter treats that marker as a stale baseline — the next poll re-captures the baseline from the plain fetch WITHOUT emitting a signal and clears the marker in place (store.remove_watchlist_config_key, a SQL json_remove so a concurrent edit to another config key is kept), so the change of fetcher is never reported as a page change. An unsaved item (no id) cannot have its marker cleared and is compared normally."
+      - "page_watch — generic web-page change detection for feed-less pages (pricing, careers, leadership, ToS). Watchlist `target` is the page URL. STATEFUL (the first stateful adapter): each poll fetches the page (bounded, SSRF-guarded), reduces it to normalized visible text (drops script/style/comments/tags, unescapes entities, collapses whitespace — so markup/layout churn doesn't register), hashes the FULL normalized text (so a change anywhere registers — no length blind spot), and compares to the last-seen hash in `page_watch_state`. First observation stores a baseline and emits NOTHING; an unchanged page emits nothing; a changed page emits ONE Signal carrying a difflib-based change summary (~N% differs + the added text; the diff/snapshot are length-capped but detection is not) and updates the baseline. Severity hint LOW (page diffs are noisy — enrichment + severity_floor filter). Dedup key folds slug + UTC date + content hash (mirrors stock — a state seen again on a later day re-alerts; same-day repeats dedup). Optional `trigger.keywords` only surfaces a change when the change itself (summary + added text) matches. Reads/writes its state via the db_path threaded through Source.poll. The reduction (html_to_text, which insert-time validation also runs on the request path) takes whatever the server sends and runs synchronously on the event loop, so every step is one forward pass: comments and script/style/noscript blocks by a scan (_strip_blocks), the remaining tags by utils.html_tags.strip_tags (shared with delegation.gmail), never a backtracking regex. The `<[^>]+>` strip it replaced rescanned to the end of the page from every '<' that nothing closed — about 40 minutes of CPU for a 2 MB page, with the API frozen meanwhile. Such a '<' stays text, and a unit test times crafted pages. The keyless httpx fetcher is the only fetch path. A row written before the xcrawl scrape path was removed still carries `config.fetch = \"xcrawl\"` (PAGE_WATCH_FETCH_LEGACY_XCRAWL) and a baseline hashed from scraped markdown; the adapter treats that marker as a stale baseline — the next poll re-captures the baseline from the plain fetch WITHOUT emitting a signal and clears the marker in place (store.remove_watchlist_config_key, a SQL json_remove so a concurrent edit to another config key is kept), so the change of fetcher is never reported as a page change. An unsaved item (no id) cannot have its marker cleared and is compared normally."
   insert_validation: |
     monitoring.target_validation.validate_and_normalize_target — runs at
     insert time on BOTH watchlist surfaces (POST /watchlist and the
@@ -6841,8 +6910,9 @@ delegation:
     Google) or error. Credentials per person, see integrations.own_gmail.
     html_to_text (HTML-only bodies and the sendAs signature) runs on mail
     anyone can send, on the event loop, so every step is one forward pass:
-    the <br> and block patterns end at the next "<" as well as ">", tags and
-    script / style elements are cut by scanning forward, and a decimal
+    the <br> and block patterns end at the next "<" as well as ">", tags
+    (utils.html_tags.strip_tags, shared with page_watch) and script / style
+    elements are cut by scanning forward, and a decimal
     character reference past Unicode's range becomes U+FFFD before
     html.unescape (which raises past 4,300 digits). A unit test times
     crafted input.
