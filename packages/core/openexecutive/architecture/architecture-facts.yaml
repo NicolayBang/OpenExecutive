@@ -6571,13 +6571,27 @@ integrations:
     "sentence-transformers/all-MiniLM-L6-v2" to this ONNX repo). The MCP stdio
     client does NOT inherit the parent environment — with env=None the child gets
     only a fixed allowlist (HOME, PATH, …) — so MCPGateway.start() explicitly
-    forwards _FORWARDED_ENV_VARS (FASTEMBED_CACHE_PATH, HF_HUB_OFFLINE, HF_HOME,
-    TRANSFORMERS_OFFLINE) when present. The API image bakes this model under
+    forwards _FORWARDED_ENV_VARS when present: the embedding cache
+    (FASTEMBED_CACHE_PATH, HF_HUB_OFFLINE, HF_HOME, TRANSFORMERS_OFFLINE), the
+    Google Workspace child's secrets and settings (GWORKSPACE_AUTH_MODE,
+    GOOGLE_*, USER_GOOGLE_EMAIL, WORKSPACE_MCP_*), and
+    EXTENSIBLE_MCP_TOKENS_FILE. The API image bakes this model under
     FASTEMBED_CACHE_PATH=/opt/fastembed-cache (docker/Dockerfile) and runs
     offline, so the ~90 MB model loads from disk instead of being re-fetched from
     the Hugging Face Hub on every cold start (which previously dominated boot).
     INVARIANT: anything the subprocess needs from the environment must be added
     to _FORWARDED_ENV_VARS — parent env is otherwise invisible to it.
+
+    url-server bearer tokens: extensible-mcp reads each url server's token from
+    a `name=token` file on every call (so another process can rotate it without
+    a restart) and sends it as `Authorization: Bearer`. The file is
+    EXTENSIBLE_MCP_TOKENS_FILE when set (forwarded above; a relative path
+    resolves against the mcp_servers.json directory), else `tokens` next to
+    mcp_servers.json (/data/company/tokens in Docker). When the variable is set
+    and the file is missing, extensible-mcp refuses to start, so every MCP
+    server is lost, not only the url ones; that fail-loud is upstream's choice.
+    A 401/403 from a url server surfaces as TokenExpiredError ("update the token
+    ... in the tokens file").
 
     Enablement (config._resolve_mcp): MCP_ENABLED left unset is INFERRED from
     the presence of mcp_servers_config_path, so dropping an mcp_servers.json

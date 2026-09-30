@@ -76,6 +76,15 @@ _EXTENSIBLE_MCP_LAUNCH_ARGS = (
 # first. They carry the workspace-mcp credentials/auth-mode and the credentials
 # dir on the /data volume. Absent → not forwarded, so non-Google installs and CI
 # are unaffected.
+#
+# EXTENSIBLE_MCP_TOKENS_FILE is extensible-mcp's own: the path of the file that
+# holds each url server's bearer token (`name=token` lines), re-read on every
+# call so another process can rotate a token without a restart. Unforwarded,
+# extensible-mcp falls back to `tokens` next to mcp_servers.json, or sends no
+# Authorization header at all — an opaque 401 from the server. Set, the file
+# must exist when the gateway starts, or extensible-mcp refuses to start and
+# every MCP server goes with it; a relative path resolves against the directory
+# holding mcp_servers.json, not the API's working directory.
 _FORWARDED_ENV_VARS = (
     "FASTEMBED_CACHE_PATH",
     "HF_HUB_OFFLINE",
@@ -90,6 +99,7 @@ _FORWARDED_ENV_VARS = (
     "WORKSPACE_MCP_CREDENTIALS_DIR",
     "WORKSPACE_MCP_TOOL_TIER",
     "WORKSPACE_MCP_TOOLS",
+    "EXTENSIBLE_MCP_TOKENS_FILE",
 )
 
 # Outbound Gmail tools whose arguments may carry recipients. Any tool name

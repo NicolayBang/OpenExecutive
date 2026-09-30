@@ -161,6 +161,24 @@ def test_gateway_forwards_embedding_cache_env(
     assert "TRANSFORMERS_OFFLINE" not in env
 
 
+def test_gateway_forwards_the_tokens_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """url servers read their bearer token from this file; stripped by the stdio
+    client's allowlist, extensible-mcp sends no Authorization header and the
+    server answers with an opaque 401."""
+    monkeypatch.setenv("EXTENSIBLE_MCP_TOKENS_FILE", "/data/secrets/extensible-mcp-tokens")
+    session = _make_mock_session()
+    config = tmp_path / "mcp_servers.json"
+    config.write_text("{}")
+
+    with _FakeMcpModules(session, _make_mock_stdio_cm()):
+        asyncio.run(MCPGateway().start(config))
+        env = sys.modules["mcp"].StdioServerParameters.call_args.kwargs["env"]
+
+    assert env["EXTENSIBLE_MCP_TOKENS_FILE"] == "/data/secrets/extensible-mcp-tokens"
+
+
 def test_gateway_launches_the_pinned_extensible_mcp(tmp_path: Path) -> None:
     """start() must use the shared launch args, so the pin and cutoff the Dockerfile
     pre-warms are what actually runs."""
