@@ -138,7 +138,8 @@ def test_intake_holds_cards_notifies_and_acknowledges_once(roster: SimpleNamespa
     async def _ack(text: str) -> None:
         acks.append(text)
 
-    async def _notify(request: rr.RosterRequest) -> str:
+    async def _notify(request: rr.RosterRequest, *, acknowledged: bool) -> str:
+        assert acknowledged
         notified.append(request.id)
         return "email"
 
@@ -158,6 +159,29 @@ def test_intake_holds_cards_notifies_and_acknowledges_once(roster: SimpleNamespa
     assert card is not None and card.routed_to_person_id == roster.owner
 
 
+def test_an_unacknowledged_sender_is_not_said_to_have_been_told(roster: SimpleNamespace) -> None:
+    """With no acknowledgement (an email Gmail did not authenticate) the card
+    and the principal's prompt say so, instead of claiming the sender was told."""
+    told: list[bool] = []
+
+    async def _notify(_request: rr.RosterRequest, *, acknowledged: bool) -> str:
+        told.append(acknowledged)
+        return "email"
+
+    with patch.object(roster_intake, "notify_principal", new=_notify):
+        request = asyncio.run(roster_intake.intake(
+            "email", STRANGER, external_id="m1", payload={"message_id": "m1"}, send_ack=None,
+        ))
+    assert request is not None and told == [False]
+    card = alerts_store.get_alert_by_external(rr.ALERT_SOURCE, rr.alert_external_id(request.id))
+    assert card is not None
+    assert "were told" not in card.body and "haven't been told anything" in card.body
+    assert "I told them" not in roster_intake._chat_prompt(request, acknowledged=False)
+    _subject, body = roster_intake._email_prompt(request, "RR-X", acknowledged=False)
+    assert "I told them" not in body and "haven't told them anything" in body
+    assert "I told them" in roster_intake._chat_prompt(request)
+
+
 def test_intake_without_a_principal_holds_nothing() -> None:
     assert asyncio.run(roster_intake.intake(
         "slack", "U1", external_id="1", payload={}, send_ack=AsyncMock(),
@@ -171,6 +195,152 @@ def test_a_failed_acknowledgement_can_be_retried(roster: SimpleNamespace) -> Non
     with patch.object(roster_intake, "notify_principal", new=AsyncMock()):
         asyncio.run(roster_intake.intake("slack", "U1", external_id="1", payload={}, send_ack=_broken))
     assert rr.claim_ack("slack", "U1")
+
+
+@pytest.mark.parametrize("error", [
+    roster_intake.AckWithheld("not authenticated"), RuntimeError("send failed"),
+], ids=["withheld", "failed"])
+def test_an_ack_that_did_not_go_out_is_never_reported_as_told(
+    roster: SimpleNamespace, error: Exception,
+) -> None:
+    """The card and the principal's prompt follow what was actually sent:
+    a withheld or failed acknowledgement leaves ``ack_sent_at`` empty and
+    the claim released."""
+    told: list[bool] = []
+
+    async def _refuse(_text: str) -> None:
+        raise error
+
+    async def _notify(_request: rr.RosterRequest, *, acknowledged: bool) -> str:
+        told.append(acknowledged)
+        return "email"
+
+    with patch.object(roster_intake, "notify_principal", new=_notify):
+        request = asyncio.run(roster_intake.intake(
+            "email", STRANGER, external_id="m1", payload={"message_id": "m1"}, send_ack=_refuse,
+        ))
+    assert request is not None and request.ack_sent_at is None
+    assert told == [False]
+    card = alerts_store.get_alert_by_external(rr.ALERT_SOURCE, rr.alert_external_id(request.id))
+    assert card is not None and "haven't been told anything" in card.body
+    stored = rr.get_request(request.id)
+    assert stored is not None and stored.ack_sent_at is None
+    assert rr.claim_ack("email", STRANGER)
+
+
+def test_a_withheld_ack_is_audited(roster: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    rows: list[str] = []
+    monkeypatch.setattr(roster_intake, "_audit", lambda event, *_a: rows.append(event))
+
+    async def _withhold(_text: str) -> None:
+        raise roster_intake.AckWithheld("Gmail did not authenticate the sender")
+
+    with patch.object(roster_intake, "notify_principal", new=AsyncMock()):
+        asyncio.run(roster_intake.intake(
+            "email", STRANGER, external_id="m1", payload={"message_id": "m1"}, send_ack=_withhold,
+        ))
+    assert "roster_ack_withheld" in rows and "roster_ack_sent" not in rows
+
+
+def test_a_withheld_ack_keeps_an_earlier_one_on_record(
+    roster: SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the ack window a forged mail from the same address claims again
+    and is withheld; the acknowledgement that really went out earlier on
+    the same request must stay recorded."""
+    with patch.object(roster_intake, "notify_principal", new=AsyncMock()):
+        first = asyncio.run(roster_intake.intake(
+            "email", STRANGER, external_id="m1", payload={"message_id": "m1"}, send_ack=AsyncMock(),
+        ))
+    assert first is not None and first.ack_sent_at is not None
+    # Eight days on: the 7-day ack window has passed, the request has not.
+    with rr._conn(None) as conn:
+        conn.execute("UPDATE roster_ack_log SET sent_at = '2000-01-01T00:00:00+00:00'")
+
+    async def _withhold(_text: str) -> None:
+        raise roster_intake.AckWithheld("forged")
+
+    with patch.object(roster_intake, "notify_principal", new=AsyncMock()):
+        again = asyncio.run(roster_intake.intake(
+            "email", STRANGER, external_id="m2", payload={"message_id": "m2"}, send_ack=_withhold,
+        ))
+    assert again is not None and again.id == first.id
+    assert again.ack_sent_at == first.ack_sent_at
+
+
+def test_the_card_still_goes_up_when_the_request_cannot_be_reread(
+    roster: SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _broken(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(rr, "get_request", _broken)
+    with patch.object(roster_intake, "notify_principal", new=AsyncMock()):
+        request = asyncio.run(roster_intake.intake(
+            "email", STRANGER, external_id="m1", payload={"message_id": "m1"}, send_ack=AsyncMock(),
+        ))
+    assert request is not None
+    card = alerts_store.get_alert_by_external(rr.ALERT_SOURCE, rr.alert_external_id(request.id))
+    assert card is not None
+
+
+def test_the_card_still_goes_up_when_the_ack_claim_fails(
+    roster: SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _locked(*_a: Any, **_k: Any) -> bool:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(rr, "claim_ack", _locked)
+    told: list[bool] = []
+
+    async def _notify(_request: rr.RosterRequest, *, acknowledged: bool) -> str:
+        told.append(acknowledged)
+        return "email"
+
+    with patch.object(roster_intake, "notify_principal", new=_notify):
+        request = asyncio.run(roster_intake.intake(
+            "email", STRANGER, external_id="m1", payload={"message_id": "m1"}, send_ack=AsyncMock(),
+        ))
+    assert request is not None and told == [False]
+    card = alerts_store.get_alert_by_external(rr.ALERT_SOURCE, rr.alert_external_id(request.id))
+    assert card is not None and "haven't been told anything" in card.body
+
+
+def test_the_card_still_goes_up_when_the_send_is_cancelled(roster: SimpleNamespace) -> None:
+    """A shutdown mid-send cancels intake; the request exists by then, and a
+    later message from the same sender would never surface it."""
+    async def _cancelled(_text: str) -> None:
+        raise asyncio.CancelledError
+
+    with (
+        patch.object(roster_intake, "notify_principal", new=AsyncMock()),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        asyncio.run(roster_intake._intake(
+            "email", STRANGER, external_id="m1", payload={"message_id": "m1"}, preview="",
+            display_name="", profile_email=None, send_ack=_cancelled,
+        ))
+    [request] = rr.list_requests()
+    card = alerts_store.get_alert_by_external(rr.ALERT_SOURCE, rr.alert_external_id(request.id))
+    assert card is not None
+
+
+def test_an_ack_past_the_daily_cap_is_not_reported_as_told(
+    roster: SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ROSTER_ACK_DAILY_CAP", "0")
+    told: list[bool] = []
+    sent = AsyncMock()
+
+    async def _notify(_request: rr.RosterRequest, *, acknowledged: bool) -> str:
+        told.append(acknowledged)
+        return "email"
+
+    with patch.object(roster_intake, "notify_principal", new=_notify):
+        request = asyncio.run(roster_intake.intake(
+            "email", STRANGER, external_id="m1", payload={"message_id": "m1"}, send_ack=sent,
+        ))
+    assert request is not None and sent.await_count == 0 and told == [False]
 
 
 def test_a_chat_senders_profile_email_suggests_who_they_are(roster: SimpleNamespace) -> None:

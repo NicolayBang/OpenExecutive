@@ -527,22 +527,42 @@ def claim_ack(
             (channel, ref, stamp),
         )
         if request_id is not None:
+            # The first acknowledgement stays the record; a later claim on the
+            # same request (past the window) must not overwrite it.
             conn.execute(
-                "UPDATE roster_requests SET ack_sent_at = ? WHERE id = ?", (stamp, request_id)
+                "UPDATE roster_requests SET ack_sent_at = COALESCE(ack_sent_at, ?) WHERE id = ?",
+                (stamp, request_id),
             )
     return True
 
 
-def release_ack(channel: str, channel_ref: str, db_path: Path | None = None) -> None:
-    """Undo the newest ``claim_ack`` for this sender (the send failed), so the
-    next message may try again."""
+def release_ack(
+    channel: str,
+    channel_ref: str,
+    db_path: Path | None = None,
+    *,
+    request_id: int | None = None,
+) -> None:
+    """Undo the newest ``claim_ack`` for this sender (the send failed or was
+    withheld), so the next message may try again — and, with ``request_id``,
+    the request's ``ack_sent_at``, so nothing reads as told."""
     ref = _clean_ref(channel, channel_ref)
     with _conn(db_path) as conn:
-        conn.execute(
-            "DELETE FROM roster_ack_log WHERE id = (SELECT id FROM roster_ack_log"
-            " WHERE channel = ? AND channel_ref = ? ORDER BY id DESC LIMIT 1)",
+        newest = conn.execute(
+            "SELECT id, sent_at FROM roster_ack_log WHERE channel = ? AND channel_ref = ?"
+            " ORDER BY id DESC LIMIT 1",
             (channel, ref),
-        )
+        ).fetchone()
+        if newest is None:
+            return
+        conn.execute("DELETE FROM roster_ack_log WHERE id = ?", (newest[0],))
+        if request_id is not None:
+            # Only the stamp this claim wrote: an acknowledgement that really
+            # went out earlier on the same request stays on record.
+            conn.execute(
+                "UPDATE roster_requests SET ack_sent_at = NULL WHERE id = ? AND ack_sent_at = ?",
+                (request_id, newest[1]),
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -695,9 +715,17 @@ def describe(request: RosterRequest) -> str:
     return f"Someone not on your People list wrote on {where}: {who}"
 
 
-def surface_card(request: RosterRequest, principal_id: int | None, db_path: Path | None = None) -> int | None:
+def surface_card(
+    request: RosterRequest,
+    principal_id: int | None,
+    db_path: Path | None = None,
+    *,
+    acknowledged: bool = True,
+) -> int | None:
     """Put a pending request on the principal's /today. Best-effort; returns
-    the alert id (None when it was already there or the insert failed)."""
+    the alert id (None when it was already there or the insert failed).
+    ``acknowledged`` is False when the sender was not sent the acknowledgement,
+    so the card doesn't say they were told."""
     from openexecutive.alerts.models import PRIVATE_ALERT_TAG
     from openexecutive.alerts.store import insert_alert
 
@@ -707,10 +735,12 @@ def surface_card(request: RosterRequest, principal_id: int | None, db_path: Path
         f"Who is {request.display_name}? ({where})" if request.display_name
         else f"Someone new wrote on {where}"
     )
-    body = describe(request) + (
-        ". They were told their message arrived and is waiting for you. Add them, "
-        "say who they are, or ignore them."
+    told = (
+        "They were told their message arrived and is waiting for you."
+        if acknowledged
+        else "They haven't been told anything yet."
     )
+    body = f"{describe(request)}. {told} Add them, say who they are, or ignore them."
     try:
         alert_id = insert_alert(
             source=ALERT_SOURCE,

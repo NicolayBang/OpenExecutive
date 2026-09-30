@@ -584,6 +584,7 @@ async def _handle_one_email(
     # runs before the turn binds its private session. The scope ends with
     # the handling.
     held_for_roster = False
+    roster_acknowledged = False
     with private_rows(private):
         if not sender_in_roster:
             # A contact, like any non-team sender, gets no reply from this turn
@@ -607,7 +608,7 @@ async def _handle_one_email(
                 private=private,
             )
             if not private:
-                held_for_roster = await _hold_for_roster(
+                held_for_roster, roster_acknowledged = await _hold_for_roster(
                     gateway, raw, from_value, from_addr, message_id, thread_id
                 )
 
@@ -662,6 +663,7 @@ async def _handle_one_email(
             await _run_executive(
                 gateway, _strip_reply_to(raw), message_id, thread_id, from_addr, session_id,
                 held_for_roster=held_for_roster,
+                roster_acknowledged=roster_acknowledged,
             )
         except Exception:
             logger.exception("Executive raised for message=%s", message_id)
@@ -676,16 +678,25 @@ async def _hold_for_roster(
     from_addr: str,
     message_id: str,
     thread_id: str,
-) -> bool:
+) -> tuple[bool, bool]:
     """Hold mail from someone off the roster for the principal to confirm
     (``integrations.roster_intake``) and acknowledge the sender once. Not for
     machine-sent mail (newsletters, notifications, bounces), nor for one of
     the principal's contacts (the caller only calls this for a non-private
-    mail, which a contact's never is). True when a request now holds it."""
+    mail, which a contact's never is). Returns (held, acknowledged): whether
+    a request now holds it, and whether the sender may have been told so.
+
+    Only a sender Gmail authenticated (``dmarc=pass`` for their domain, read
+    from the raw message) is acknowledged. The printed headers never carry
+    Authentication-Results, so without that read a forged From would draw
+    the acknowledgement to whoever it names: backscatter from the
+    Executive's mailbox. An unauthenticated sender is still held, silently.
+    The raw read happens only once intake has claimed an acknowledgement."""
     from openexecutive.integrations import roster_intake
+    from openexecutive.integrations.fact_confirmation import sender_authenticated
 
     if not from_addr or roster_intake.looks_automated(raw, from_addr):
-        return False
+        return False, False
     display_name, _addr = parseaddr(from_value)
     header, body_lines, _att = _split_gmail_content(raw)
     new_lines, _fw = _new_text_lines(body_lines)
@@ -694,6 +705,8 @@ async def _hold_for_roster(
     preview = f"{subject} — {' '.join(new_lines)}" if subject else " ".join(new_lines)
 
     async def _ack(_text: str) -> None:
+        if not await sender_authenticated(gateway, message_id, from_addr):
+            raise roster_intake.AckWithheld("Gmail did not authenticate the sender")
         await roster_intake.send_email_ack(gateway, from_addr)
 
     request = await roster_intake.intake(
@@ -704,7 +717,9 @@ async def _hold_for_roster(
         display_name=display_name,
         send_ack=_ack,
     )
-    return request is not None
+    if request is None:
+        return False, False
+    return True, request.ack_sent_at is not None
 
 
 async def replay_held_email(message: Any, _request: Any) -> bool:
@@ -841,6 +856,7 @@ async def _run_executive(
     session_id: str | None = None,
     *,
     held_for_roster: bool = False,
+    roster_acknowledged: bool = False,
 ) -> None:
     from openexecutive.knowledge.retriever import retrieve
     from openexecutive.memory.episodic import format_for_prompt
@@ -952,8 +968,13 @@ async def _run_executive(
         policy_notice = (
             # Keep this opening sentence identical to _contact_notice's.
             f"[POLICY] This inbound is from {from_addr}, who is NOT on your team's "
-            "People roster. They have already been told their message arrived and "
-            "is waiting, and the principal has been asked who they are (a card on "
+            "People roster. "
+            + (
+                "They have already been told their message arrived and is waiting, "
+                if roster_acknowledged
+                else "They have not been told anything yet, "
+            )
+            + "and the principal has been asked who they are (a card on "
             "their Today page) — do not raise another alert or proposal just to "
             "add them. You can classify it, log a decision, schedule an internal "
             "follow-up, or alert the principal about what the email itself needs. "

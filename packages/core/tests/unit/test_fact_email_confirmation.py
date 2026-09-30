@@ -523,6 +523,64 @@ def test_authenticated_by_gmail(headers: tuple[str, ...], sender: str, ok: bool)
     assert fc.authenticated_by_gmail(raw, OWNER) is ok
 
 
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        # A quoted envelope local part Gmail writes into smtp.mailfrom.
+        'Authentication-Results: mx.google.com; spf=pass smtp.mailfrom="x;dmarc=pass '
+        'header.from=northwind.test "@attacker.test; dmarc=fail header.from=northwind.test',
+        # The same in the SPF comment, ahead of Gmail's real verdict.
+        "Authentication-Results: mx.google.com; spf=pass (google.com: domain of "
+        '"a;dmarc=pass header.from=northwind.test "@attacker.test designates 192.0.2.1) '
+        "smtp.mailfrom=attacker.test; dmarc=fail header.from=northwind.test",
+        # A comment alone, then no verdict of Gmail's at all.
+        "Authentication-Results: mx.google.com; spf=pass (x;dmarc=pass "
+        "header.from=northwind.test) smtp.mailfrom=attacker.test",
+        # Two verdicts: never guess which one is Gmail's.
+        "Authentication-Results: mx.google.com; dmarc=pass header.from=northwind.test; "
+        "dmarc=fail header.from=northwind.test",
+        # Unbalanced quoting or comments: unreadable, so not authenticated.
+        'Authentication-Results: mx.google.com; smtp.mailfrom="x; dmarc=pass header.from=northwind.test',
+        "Authentication-Results: mx.google.com; (x; dmarc=pass header.from=northwind.test",
+        # Unquoted text Gmail might echo, on a From domain with no DMARC of its own.
+        "Authentication-Results: mx.google.com; spf=pass smtp.mailfrom=x;dmarc=pass "
+        "header.from=northwind.test @attacker.test",
+    ],
+    ids=["quoted-mailfrom", "quoted-in-spf-comment", "comment-only", "two-verdicts",
+         "unbalanced-quote", "unbalanced-comment", "unquoted-echo"],
+)
+def test_sender_written_text_in_gmails_stamp_is_no_verdict(stamp: str) -> None:
+    """Gmail copies the envelope sender (and DKIM tags) into its own
+    Authentication-Results; a quoted string or comment there must not read
+    as a DMARC pass."""
+    assert fc.authenticated_by_gmail(_raw_mime(stamp), OWNER) is False
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        GMAIL_PASS,
+        "Authentication-Results: mx.google.com;\r\n       arc=pass (i=1 spf=pass "
+        "spf.mailfrom=owner@northwind.test dmarc=pass fromdomain=northwind.test);"
+        "\r\n       spf=pass (google.com: domain of owner@northwind.test designates "
+        "2a00:1450:4864::12c as permitted sender) smtp.mailfrom=owner@northwind.test;"
+        "\r\n       dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=northwind.test",
+        'Authentication-Results: mx.google.com; dkim=pass header.i=@northwind.test '
+        'header.s=s1 header.b="Ab/+cd12"; spf=pass smtp.mailfrom="john.doe"@northwind.test; '
+        "dmarc=pass (p=QUARANTINE sp=QUARANTINE dis=NONE) header.from=northwind.test",
+        # Mail sent from Gmail / Workspace: Gmail adds dara= after its verdict.
+        "Authentication-Results: mx.google.com;\r\n       dkim=pass header.i=@northwind.test "
+        "header.s=google header.b=AbCd;\r\n       spf=pass (google.com: domain of "
+        "owner@northwind.test designates 209.85.220.41 as permitted sender) "
+        "smtp.mailfrom=owner@northwind.test;\r\n       dmarc=pass (p=NONE sp=QUARANTINE "
+        "dis=NONE) header.from=northwind.test;\r\n       dara=pass header.i=@northwind.test",
+    ],
+    ids=["gmail-pass", "arc-and-spf-comment", "quoted-values", "dara-after-verdict"],
+)
+def test_real_gmail_stamps_still_pass(stamp: str) -> None:
+    assert fc.authenticated_by_gmail(_raw_mime(stamp), OWNER) is True
+
+
 def test_a_subject_imitating_the_raw_separator_cannot_supply_the_headers() -> None:
     """Everything above the separator is sender-written header values; a
     Subject reading "--- RAW MIME ---" must not move where the raw message

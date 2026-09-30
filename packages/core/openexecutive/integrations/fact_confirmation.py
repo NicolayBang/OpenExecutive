@@ -82,7 +82,9 @@ def principal_address() -> str:
 _RAW_MIME_SEPARATOR = "\n\n--- RAW MIME ---\n"
 # The authserv-id Gmail stamps on the Authentication-Results of mail it receives.
 _GMAIL_AUTHSERV = "mx.google.com"
-_HEADER_FROM = re.compile(r"\bheader\.from=([^\s;()]+)")
+# Gmail's DMARC resinfo once its comment is stripped, e.g.
+# "dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=example.com".
+_DMARC_PASS = re.compile(r"dmarc=pass\s+header\.from=([^\s;]+)")
 # Marks of an automatic reply (an out-of-office, a vacation responder) in the
 # raw headers. The printed headers the poller reads carry only Precedence and
 # the List-* ones, so an Exchange out-of-office — Auto-Submitted only — would
@@ -107,6 +109,28 @@ def _raw_headers(raw: str) -> Message | None:
         return None
 
 
+_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
+_COMMENT = re.compile(r"\((?:[^()\\]|\\.)*\)")
+
+
+def _strip_quotes_and_comments(value: str) -> str | None:
+    """``value`` with RFC 8601 quoted strings and (nested) comments removed,
+    or None when they don't balance. Gmail writes sender-chosen text into its
+    own Authentication-Results — the envelope sender in ``smtp.mailfrom=`` and
+    the SPF comment, DKIM tags — and a quoted local part such as
+    ``"x;dmarc=pass header.from=victim.com "@attacker.com`` would otherwise
+    read as a verdict of its own."""
+    value = _QUOTED.sub('""', value)
+    while True:
+        stripped = _COMMENT.sub(" ", value)
+        if stripped == value:
+            break
+        value = stripped
+    if '"' in value.replace('""', "") or "(" in value or ")" in value:
+        return None
+    return value
+
+
 def authenticated_by_gmail(raw: str, from_addr: str) -> bool:
     """Whether a raw message (``get_gmail_message_content`` with
     ``body_format="raw"``) shows Gmail found ``from_addr``'s domain
@@ -127,17 +151,23 @@ def authenticated_by_gmail(raw: str, from_addr: str) -> bool:
         return False
     if raw_from.strip().lower() != address or not results:
         return False
-    newest = " ".join(str(results[0]).split()).lower()
+    newest = _strip_quotes_and_comments(" ".join(str(results[0]).split()).lower())
+    if newest is None:
+        return False
     authserv, _sep, rest = newest.partition(";")
     if authserv.strip() != _GMAIL_AUTHSERV:
         return False
-    dmarc = next((c.strip() for c in rest.split(";") if c.strip().startswith("dmarc=")), "")
-    header_from = _HEADER_FROM.search(dmarc)
-    return (
-        re.match(r"dmarc=pass\b", dmarc) is not None
-        and header_from is not None
-        and header_from.group(1) == address.rsplit("@", 1)[1]
-    )
+    # Gmail writes one dmarc= verdict and nothing else in it; it may be
+    # followed by its own dara= resinfo (mail sent from Gmail / Workspace).
+    # A second verdict, or extra text in it, is sender text Gmail echoed.
+    # Residual: when Gmail writes NO verdict (a From domain without DMARC)
+    # and echoes an unsanitised ``;dmarc=pass header.from=...`` elsewhere
+    # (a HELO on null-sender mail), that echo would read as the verdict.
+    verdicts = [c.strip() for c in rest.split(";") if c.strip().startswith("dmarc=")]
+    if len(verdicts) != 1:
+        return False
+    verdict = _DMARC_PASS.fullmatch(verdicts[0])
+    return verdict is not None and verdict.group(1) == address.rsplit("@", 1)[1]
 
 
 def automatic_reply(raw: str) -> bool:
