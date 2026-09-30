@@ -212,9 +212,9 @@ class _ExecutiveDefaults:
 
     @staticmethod
     def model() -> str:
-        from openexecutive.config import get_settings
+        from openexecutive.agents.model_defaults import default_model
 
-        return get_settings().default_model
+        return default_model()
 
     @staticmethod
     def prompt() -> str:
@@ -473,10 +473,8 @@ async def _test_executive(req: AgentTestRequest) -> str:
     a single messages.create so the Council UI can preview how an edited
     persona reads, not a real chat turn.
     """
-    from openexecutive.config import get_settings
     from openexecutive.providers import get_provider
 
-    settings = get_settings()
     ov = get_override(EXECUTIVE_ID)
     prompt = (
         req.prompt
@@ -493,7 +491,7 @@ async def _test_executive(req: AgentTestRequest) -> str:
         else (
             ov.model
             if ov is not None and ov.model is not None
-            else settings.default_model
+            else _ExecutiveDefaults.model()
         )
     )
     message = await get_provider(model).messages_create(

@@ -72,6 +72,12 @@ class Session:
     # of the principal it plays without writing the install-wide row. Read
     # it through `memory.workspace_settings.effective_principal_role`.
     principal_role: PrincipalRole | None = None
+    # Per-session override of Settings → Replies & cost's reply length
+    # ("shorter" / "standard" / "fuller"; None = use the workspace's), for
+    # the same reason: an eval scenario checks a length without writing the
+    # install-wide row. Read it through
+    # `memory.workspace_settings.effective_reply_length`.
+    reply_length: str | None = None
     # The mode resolved for the turn in progress, pinned at its start by
     # `workspace_settings.pin_turn_workspace_mode` (Executive.stream_chat and
     # the committee path) so the tool handlers use the same mode as the

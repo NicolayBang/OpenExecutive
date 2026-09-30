@@ -9,6 +9,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+from openexecutive.agents.model_defaults import default_model
 from openexecutive.audit import bind_turn, clear_turn, private_rows, set_turn
 from openexecutive.audit import log_event as audit_log
 from openexecutive.audit.redaction import (
@@ -29,6 +30,8 @@ from openexecutive.memory.facts import render_facts_for_prompt
 from openexecutive.memory.honcho_client import ReasoningLevel as HonchoReasoningLevel
 from openexecutive.memory.workspace_settings import (
     effective_principal_role,
+    effective_reply_length,
+    effective_speed,
     effective_workspace_mode,
     pin_turn_principal_role,
     pin_turn_workspace_mode,
@@ -146,11 +149,24 @@ from openexecutive.orchestrator.workflow_run_tools import (
     WORKFLOW_RUN_TOOLS,
 )
 from openexecutive.prompts.cache_manager import build_system_blocks
-from openexecutive.providers import get_provider
+from openexecutive.prompts.reply_length import reply_length_note
+from openexecutive.providers import get_provider, model_supports_deep_reasoning
 from openexecutive.providers.translator import reasoning_replay_block
 from openexecutive.workflows.tool_catalog import filter_search_results
 
 logger = logging.getLogger(__name__)
+
+
+def _effort_kwargs(model: str, speed: str) -> dict[str, Any]:
+    """Settings → Speed. ``faster`` asks for ``output_config.effort: "low"``
+    on a model that takes it (quicker and cheaper: less deliberation before
+    the reply); ``standard`` adds nothing, so the request is byte-identical
+    to one sent before the setting existed. Haiku rejects ``effort``
+    outright (``model_supports_deep_reasoning``), and the provider feature
+    gate strips it for a model that cannot reason."""
+    if speed == "faster" and model_supports_deep_reasoning(model):
+        return {"output_config": {"effort": "low"}}
+    return {}
 
 
 def _private_to_principal(session: Any) -> bool:
@@ -643,6 +659,7 @@ class Executive:
         page_context_block: str = "",
         working_style: str = "",
         standing_facts: str = "",
+        reply_length: str = "",
     ) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
         history = session.get_recent_history()
@@ -668,6 +685,14 @@ class Executive:
         if speaker_block:
             user_content_parts.append(
                 {"type": "text", "text": f"<current_speaker>\n{speaker_block}\n</current_speaker>"}
+            )
+        # How long replies should run, from Settings → Replies & cost
+        # (prompts.reply_length). User turn, never the cached persona, whose
+        # Length ladder it shifts by one rung. Placed before the speaker's
+        # own working style, which wins over it.
+        if reply_length:
+            user_content_parts.append(
+                {"type": "text", "text": f"<reply_length>\n{reply_length}\n</reply_length>"}
             )
         # How this speaker likes replies (attunement.style) — only ever their
         # own rules, in the user turn, never a cached system block.
@@ -832,7 +857,9 @@ class Executive:
         # Wrap in try/except so an override-store outage doesn't block chat.
         persona_override: str | None = None
         voice_persona_body: str | None = None
-        effective_model = self._settings.default_model
+        # Settings' model (Replies & cost), else DEFAULT_MODEL; the Council
+        # override below still wins.
+        effective_model = default_model()
         try:
             from openexecutive.agents.overrides import (
                 EXECUTIVE_AGENT_ID,
@@ -928,6 +955,7 @@ class Executive:
                 page_context_block=page_context_block,
                 working_style=working_style,
                 standing_facts=standing_facts,
+                reply_length=reply_length_note(effective_reply_length(session)),
             )
 
             _emit_memory_snapshot(
@@ -1144,7 +1172,9 @@ class Executive:
 
         persona_override: str | None = None
         voice_persona_body: str | None = None
-        effective_model = self._settings.default_model
+        # Settings' model (Replies & cost), else DEFAULT_MODEL; the Council
+        # override below still wins.
+        effective_model = default_model()
         try:
             from openexecutive.agents.overrides import (
                 EXECUTIVE_AGENT_ID,
@@ -1234,6 +1264,7 @@ class Executive:
             page_context_block=page_context_block,
             working_style=working_style,
             standing_facts=standing_facts,
+            reply_length=reply_length_note(effective_reply_length(session)),
         )
 
         # ----- Phase 1: drafting -----------------------------------------
@@ -1326,7 +1357,7 @@ class Executive:
 
         from openexecutive.orchestrator.committee import Committee
         committee = Committee(
-            reviewer_model=self._settings.default_model,
+            reviewer_model=default_model(),
         )
         # Mirror the upcoming review onto the debug stream so the Agent
         # Activity panel shows committee progress alongside the inline
@@ -1411,6 +1442,7 @@ class Executive:
             max_tokens=8192,
             system=system_blocks,  # type: ignore[arg-type]
             messages=revision_messages,  # type: ignore[arg-type]
+            **_effort_kwargs(effective_model, effective_speed()),
         ) as stream:
             async for event in stream:
                 if (
@@ -1601,6 +1633,10 @@ class Executive:
         """
         if workspace_mode is None:
             workspace_mode = effective_workspace_mode(current_session.get())
+        # Settings → Speed, read once for the whole loop so every round of
+        # one turn asks for the same effort (a change mid-turn would also
+        # cost a cache miss between rounds).
+        speed = effective_speed()
         if principal_role_tag is None:
             principal_role_tag = (
                 principal_role_context(effective_principal_role(current_session.get()))
@@ -1692,13 +1728,14 @@ class Executive:
             web_search_tool = build_web_search_tool()
             if web_search_tool is not None:
                 tools_with_cache.append(web_search_tool)
-            stream_model = model or self._settings.default_model
+            stream_model = model or default_model()
             async with get_provider(stream_model).messages_stream(
                 model=stream_model,
                 max_tokens=8192,
                 system=system_blocks,  # type: ignore[arg-type]
                 tools=tools_with_cache,  # type: ignore[arg-type,list-item]
                 messages=current_messages,  # type: ignore[arg-type]
+                **_effort_kwargs(stream_model, speed),
             ) as stream:
                 async for event in stream:
                     if (

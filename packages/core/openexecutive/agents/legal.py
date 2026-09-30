@@ -1,5 +1,5 @@
 from openexecutive.agents.base import BaseAgent
-from openexecutive.config import get_settings
+from openexecutive.agents.model_defaults import deep_reasoning_model
 
 
 class LegalAgent(BaseAgent):
@@ -9,7 +9,7 @@ class LegalAgent(BaseAgent):
 
     @property
     def model(self) -> str:  # type: ignore[override]
-        return get_settings().deep_reasoning_model
+        return deep_reasoning_model()
 
     def get_system_prompt(self) -> str:
         from openexecutive.prompts.domain_prompts import GC_PROMPT

@@ -24,6 +24,14 @@ One row (``id = 1``) in the ``workspace_settings`` table of the episodic DB:
   NULL to derive them from the principal's addresses (``people.identity``).
   An address on one of them matches a teammate by its local part, so
   anna+x@acme.io is the Anna whose address is anna@acme.com.
+- How the Executive replies (Settings → Replies & cost), all nullable, NULL
+  meaning "standard": ``reply_length`` (``shorter`` / ``standard`` /
+  ``fuller``, a ``<reply_length>`` note in the user turn — never the cached
+  persona), ``speed`` (``standard`` / ``faster``: faster sends
+  ``output_config.effort: "low"`` on the Executive's and the specialists'
+  calls) and ``default_model`` (the model the Executive and the specialists
+  run on instead of ``DEFAULT_MODEL`` / ``DEEP_REASONING_MODEL``; a Council
+  override for one agent still wins — see ``agents.model_defaults``).
 
 The row lives in its own table rather than on ``CompanyProfile`` on purpose:
 onboarding's commit and the form wizard rebuild the profile from scratch,
@@ -63,6 +71,16 @@ DEFAULT_MODE: WorkspaceMode = "team"
 # Longest IANA key is ~30 chars; anything far past that is not a zone name.
 _MAX_TZ_LEN = 64
 
+# Settings → Replies & cost. NULL in the table reads as "standard".
+ReplyLength = Literal["shorter", "standard", "fuller"]
+REPLY_LENGTHS: tuple[str, ...] = get_args(ReplyLength)
+Speed = Literal["standard", "faster"]
+SPEEDS: tuple[str, ...] = get_args(Speed)
+# Model ids are short slugs (``claude-opus-5-5``, ``openai/gpt-6-astra``);
+# anything far past this is not one.
+_MAX_MODEL_LEN = 200
+RESPONSE_FIELDS: tuple[str, ...] = ("reply_length", "speed", "default_model")
+
 # How the principal relates to the organisation in their profile.
 RoleKind = Literal["owner", "in_house", "independent", "other"]
 ROLE_KINDS: tuple[str, ...] = get_args(RoleKind)
@@ -96,7 +114,10 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     reports_to TEXT,
     remit TEXT,
     measured_on TEXT,
-    company_domains TEXT
+    company_domains TEXT,
+    reply_length TEXT,
+    speed TEXT,
+    default_model TEXT
 )
 """
 
@@ -132,6 +153,10 @@ class WorkspaceSettings(PrincipalRole):
     timezone: str | None = None
     # None: derive from the principal's addresses (people.identity).
     company_domains: list[str] | None = None
+    # None: standard / the env model (Settings → Replies & cost).
+    reply_length: ReplyLength | None = None
+    speed: Speed | None = None
+    default_model: str | None = None
 
 
 def _resolve_db_path(db_path: Path | None) -> Path:
@@ -156,7 +181,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     concurrent boot counts as success)."""
     conn.execute(_CREATE_SQL)
     existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({TABLE})")}
-    for col in (*ROLE_FIELDS, "company_domains"):
+    for col in (*ROLE_FIELDS, "company_domains", *RESPONSE_FIELDS):
         if col in existing:
             continue
         try:
@@ -281,6 +306,67 @@ def validate_company_domains(value: object) -> list[str] | None:
     return sorted(out)
 
 
+def validate_reply_length(value: object) -> ReplyLength | None:
+    """``value`` as a reply length; None, blank or ``standard`` means "not
+    set" (the persona's own ladder). Raises ``ValueError`` otherwise."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or value.strip() not in REPLY_LENGTHS:
+        raise ValueError(f"reply_length must be one of {', '.join(REPLY_LENGTHS)}")
+    name = value.strip()
+    return None if name == "standard" else cast(ReplyLength, name)
+
+
+def validate_speed(value: object) -> Speed | None:
+    """``value`` as a speed; None or ``standard`` means "not set". Raises
+    ``ValueError`` otherwise."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or value.strip() not in SPEEDS:
+        raise ValueError(f"speed must be one of {', '.join(SPEEDS)}")
+    name = value.strip()
+    return None if name == "standard" else cast(Speed, name)
+
+
+def validate_default_model(value: object) -> str | None:
+    """``value`` as a model this install can serve, or None (blank) for the
+    env model. Raises ``ValueError`` for a model outside
+    ``providers.registry.allowed_models()`` — the same allowlist the
+    Council's per-agent picker is held to. The message never quotes the
+    value."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("default_model must be a string")
+    name = value.strip()
+    if not name:
+        return None
+    from openexecutive.providers.registry import allowed_models
+
+    if len(name) > _MAX_MODEL_LEN or name not in allowed_models():
+        raise ValueError("default_model is not one of the models this install can use")
+    return name
+
+
+def _stored_response(row: sqlite3.Row) -> dict[str, str | None]:
+    """The reply-length and speed columns of a stored row; a missing column
+    or a value that no longer validates reads as unset. The model is kept
+    as stored — ``workspace_model`` checks it against the allowlist at use
+    time, so a provider switched back on brings it back. Never raises."""
+    keys = set(row.keys())
+    out: dict[str, str | None] = {}
+    for field, check in (("reply_length", validate_reply_length), ("speed", validate_speed)):
+        if field not in keys:
+            continue
+        try:
+            out[field] = check(row[field])
+        except ValueError:
+            logger.warning("workspace: ignoring an invalid stored %s", field)
+    if "default_model" in keys and isinstance(row["default_model"], str):
+        out["default_model"] = row["default_model"].strip() or None
+    return out
+
+
 def _stored_domains(row: sqlite3.Row) -> list[str] | None:
     """The stored company domains, or None (derive) when the column is
     missing, empty or no longer validates. Never raises."""
@@ -390,8 +476,49 @@ def get_workspace(db_path: Path | None = None) -> WorkspaceSettings:
             "timezone": _stored_zone(row["timezone"]),
             "company_domains": _stored_domains(row),
             **_stored_role(row),
+            **_stored_response(row),
         }
     )
+
+
+def workspace_model() -> str | None:
+    """The model Settings → Replies & cost picked for the Executive and the
+    specialists, or None for the env model (``DEFAULT_MODEL`` /
+    ``DEEP_REASONING_MODEL``).
+
+    A stored model this install can no longer serve (its provider was
+    switched off, or the catalog dropped it) is ignored with a warning, so
+    chat never fails on a stale choice. Never raises."""
+    name = get_workspace().default_model
+    if not name:
+        return None
+    try:
+        from openexecutive.providers.registry import allowed_models
+
+        if name in allowed_models():
+            return name
+    except Exception:
+        logger.exception("workspace: could not check the stored default_model")
+        return None
+    logger.warning("workspace: stored default_model is not available here; using the env model")
+    return None
+
+
+def effective_speed() -> Speed:
+    """The speed in effect: ``faster`` or ``standard``. Never raises."""
+    return get_workspace().speed or "standard"
+
+
+def effective_reply_length(session: Session | None = None) -> ReplyLength:
+    """The reply length for a turn: the session's override when it carries a
+    valid one (an eval scenario's ``reply_length`` — scenarios run
+    concurrently on one Executive, so they cannot write the install-wide
+    row), else the workspace's, read fresh. Never raises."""
+    if session is not None:
+        override = getattr(session, "reply_length", None)
+        if isinstance(override, str) and override in REPLY_LENGTHS:
+            return cast(ReplyLength, override)
+    return get_workspace().reply_length or "standard"
 
 
 def _log_read_failure(exc: BaseException) -> None:
@@ -504,7 +631,7 @@ def _upsert(db_path: Path | None, **columns: str | None) -> None:
     """Write the given columns of the row (``mode`` / ``timezone`` / the role
     fields), leaving the others as they are. Creates the table, any missing
     column and the row as needed."""
-    unknown = set(columns) - {"mode", "timezone", "company_domains", *ROLE_FIELDS}
+    unknown = set(columns) - {"mode", "timezone", "company_domains", *ROLE_FIELDS, *RESPONSE_FIELDS}
     if unknown:
         raise ValueError(f"unknown workspace column(s): {sorted(unknown)}")
     names = list(columns)
@@ -614,6 +741,26 @@ def set_company_domains(domains: list[str] | None) -> WorkspaceSettings:
     return get_workspace()
 
 
+def set_response_preferences(**fields: object) -> WorkspaceSettings:
+    """Store any of ``reply_length`` / ``speed`` / ``default_model``, leaving
+    the others as they are; None, blank or ``standard`` clears one. Raises
+    ``ValueError`` for an unknown field or a value that does not validate —
+    before anything is written. No side effects: the next turn (and the
+    next specialist call) reads it fresh."""
+    unknown = set(fields) - set(RESPONSE_FIELDS)
+    if unknown:
+        raise ValueError(f"unknown response field(s): {sorted(unknown)}")
+    checks = {
+        "reply_length": validate_reply_length,
+        "speed": validate_speed,
+        "default_model": validate_default_model,
+    }
+    clean = {f: checks[f](v) for f, v in fields.items()}
+    if clean:
+        _upsert(None, **clean)
+    return get_workspace()
+
+
 def restore_workspace_settings(
     settings: WorkspaceSettings, db_path: Path | None = None
 ) -> None:
@@ -630,11 +777,17 @@ def restore_workspace_settings(
             else None
         ),
         **{f: validate_role_field(f, getattr(settings, f)) for f in ROLE_FIELDS},
+        reply_length=validate_reply_length(settings.reply_length),
+        speed=validate_speed(settings.speed),
+        # Verbatim, not re-validated: a fixture may name a model this
+        # install cannot serve yet; ``workspace_model`` ignores it until it can.
+        default_model=(settings.default_model or "").strip() or None,
     )
 
 
 def reset_workspace_settings(db_path: Path | None = None) -> None:
-    """Back to the defaults (team, no zone, no role). No scheduler side effects.
+    """Back to the defaults (team, no zone, no role, standard replies). No
+    scheduler side effects.
 
     A DB file that does not exist has nothing to reset and is not created.
     """

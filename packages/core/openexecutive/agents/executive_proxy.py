@@ -11,13 +11,19 @@ completion, which is the correct "does this prompt produce sensible output?" che
 from __future__ import annotations
 
 from openexecutive.agents.base import BaseAgent
+from openexecutive.agents.model_defaults import default_model
 
 
 class ExecutiveProxy(BaseAgent):
     name = "executive"
     domain = "orchestration"
-    model = "claude-sonnet-5"  # matches DEFAULT_MODEL default
     use_deep_reasoning = False
+
+    @property
+    def model(self) -> str:  # type: ignore[override]
+        # What Executive.stream_chat runs on without a Council override:
+        # Settings' model, else DEFAULT_MODEL.
+        return default_model()
 
     def get_system_prompt(self) -> str:
         # The built-in persona for this install's workspace mode (team / solo).

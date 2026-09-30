@@ -29,6 +29,10 @@ settings' role fields) to play a principal with that role. It goes on the
 session (``Session.principal_role``) the same way, never into the
 install-wide settings row, which concurrent scenarios would share.
 
+A chat scenario may set ``reply_length`` (``shorter`` / ``standard`` /
+``fuller``) to run with that Settings → Replies & cost length, on
+``Session.reply_length`` the same way.
+
 A chat scenario may set a ``delegation`` block (Act as me: the asker, their
 threads) to run with ``ghostwrite_email`` offered against an in-memory
 mailbox (``scenarios.scenario_delegation``); the drafts it saves go to the
@@ -184,6 +188,23 @@ def scenario_workspace_mode(scenario: dict[str, Any]) -> str | None:
     if mode not in ("solo", "team"):
         raise ValueError(f"workspace_mode must be 'solo' or 'team', got {mode!r}")
     return str(mode)
+
+
+def scenario_reply_length(scenario: dict[str, Any]) -> str | None:
+    """The scenario's ``reply_length`` ("shorter" / "standard" / "fuller"),
+    or None to run under the install's own setting. Raises ValueError for any
+    other value, so a typo fails the scenario instead of silently running at
+    the wrong length."""
+    from openexecutive.memory.workspace_settings import REPLY_LENGTHS
+
+    value = scenario.get("reply_length")
+    if value is None:
+        return None
+    if value not in REPLY_LENGTHS:
+        raise ValueError(
+            f"reply_length must be one of {', '.join(REPLY_LENGTHS)}, got {value!r}"
+        )
+    return str(value)
 
 
 def scenario_standing_facts(scenario: dict[str, Any]) -> str:
@@ -408,6 +429,7 @@ def _make_chat_runner(
                         company_profile=profile,
                         workspace_mode=scenario_workspace_mode(scenario),
                         principal_role=scenario_principal_role(scenario),
+                        reply_length=scenario_reply_length(scenario),
                         delegation_override=delegation,
                     )
                     query = scenario["query"]

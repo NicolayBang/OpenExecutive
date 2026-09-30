@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 from collections.abc import Iterable, Mapping
@@ -75,6 +76,10 @@ _loaded_file_input: frozenset[str] = frozenset()
 # Every id in the last fetched catalog (unfiltered), so ``accepts_files`` can
 # tell "known, no file input" from "not in the catalog".
 _known_ids: frozenset[str] = frozenset()
+# USD per 1M input / output tokens for each id in the last fetched catalog
+# that states a price — shown next to each model in the Settings and
+# Council pickers (``providers.pricing``).
+_loaded_prices: dict[str, tuple[float, float]] = {}
 _loaded_at: float | None = None
 
 
@@ -127,6 +132,40 @@ def reasoning_capable_ids(entries: Iterable[Mapping[str, Any]]) -> frozenset[str
         if isinstance(model_id, str) and _advertises(entry, "reasoning"):
             out.add(model_id)
     return frozenset(out)
+
+
+def price_for(model_id: str) -> tuple[float, float] | None:
+    """USD per 1M (input, output) tokens the loaded catalog states for
+    ``model_id``, or None when no catalog is loaded or it states none."""
+    return _loaded_prices.get(model_id)
+
+
+# Above this a per-1M price is not a real price (the most expensive models
+# are in the tens of dollars); a remote value past it is dropped.
+_MAX_USD_PER_MTOK = 10_000.0
+
+
+def prices_per_mtok(entries: Iterable[Mapping[str, Any]]) -> dict[str, tuple[float, float]]:
+    """(input, output) USD per 1M tokens for each catalog entry with a usable
+    price. OpenRouter states ``pricing.prompt`` / ``pricing.completion`` in
+    USD per token, as strings; anything that is not a finite, non-negative
+    number in range is skipped rather than guessed."""
+    out: dict[str, tuple[float, float]] = {}
+    for entry in entries:
+        model_id = entry.get("id")
+        pricing = entry.get("pricing")
+        if not isinstance(model_id, str) or not _SLUG_RE.match(model_id):
+            continue
+        if not isinstance(pricing, Mapping):
+            continue
+        try:
+            prompt = float(pricing.get("prompt")) * 1_000_000
+            completion = float(pricing.get("completion")) * 1_000_000
+        except (TypeError, ValueError):
+            continue
+        if all(math.isfinite(v) and 0 <= v <= _MAX_USD_PER_MTOK for v in (prompt, completion)):
+            out[model_id] = (round(prompt, 4), round(completion, 4))
+    return out
 
 
 def loaded_at() -> float | None:
@@ -263,6 +302,7 @@ async def refresh_openrouter_catalog(settings: Any) -> bool:
     (or the never-loaded state → registry fallback) untouched.
     """
     global _loaded_models, _loaded_reasoning, _loaded_file_input, _known_ids, _loaded_at
+    global _loaded_prices
     try:
         entries = await fetch_catalog(
             base_url=settings.openrouter_base_url,
@@ -285,6 +325,7 @@ async def refresh_openrouter_catalog(settings: Any) -> bool:
     _loaded_models = models
     _loaded_reasoning = reasoning_capable_ids(entries) & frozenset(models)
     _loaded_file_input = file_input_ids(entries)
+    _loaded_prices = prices_per_mtok(entries)
     _known_ids = frozenset(
         e["id"] for e in entries if isinstance(e, Mapping) and isinstance(e.get("id"), str)
     )
@@ -322,7 +363,9 @@ async def run_catalog_refresher(settings: Any) -> None:
 
 def _reset_for_tests() -> None:
     global _loaded_models, _loaded_reasoning, _loaded_file_input, _known_ids, _loaded_at
+    global _loaded_prices
     _loaded_models = None
+    _loaded_prices = {}
     _loaded_reasoning = frozenset()
     _loaded_file_input = frozenset()
     _known_ids = frozenset()

@@ -13,7 +13,7 @@ OUTSIDE ``SPECIALIST_REGISTRY`` so the Executive cannot call it via
 from __future__ import annotations
 
 from openexecutive.agents.base import BaseAgent
-from openexecutive.config import get_settings
+from openexecutive.agents.model_defaults import default_model
 
 WORKFLOW_ACTOR_AGENT_ID = "workflow_actor"
 
@@ -57,7 +57,7 @@ class WorkflowActorAgent(BaseAgent):
     def model(self) -> str:  # type: ignore[override]
         # Read at access time so settings changes flow through. Same pattern
         # as WorkflowDesignerAgent.
-        return get_settings().default_model
+        return default_model()
 
     def get_system_prompt(self) -> str:
         return WORKFLOW_ACTOR_SYSTEM

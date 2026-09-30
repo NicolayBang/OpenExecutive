@@ -1,5 +1,5 @@
 from openexecutive.agents.base import BaseAgent
-from openexecutive.config import get_settings
+from openexecutive.agents.model_defaults import default_model
 
 
 class SalesAgent(BaseAgent):
@@ -8,7 +8,7 @@ class SalesAgent(BaseAgent):
 
     @property
     def model(self) -> str:  # type: ignore[override]
-        return get_settings().default_model
+        return default_model()
 
     def get_system_prompt(self) -> str:
         from openexecutive.prompts.domain_prompts import SALES_PROMPT

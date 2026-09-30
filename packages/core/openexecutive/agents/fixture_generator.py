@@ -11,7 +11,7 @@ generation, so Council edits take effect on the next request without a restart.
 from __future__ import annotations
 
 from openexecutive.agents.base import BaseAgent
-from openexecutive.config import get_settings
+from openexecutive.agents.model_defaults import default_model
 
 FIXTURE_GENERATOR_AGENT_ID = "fixture_generator"
 
@@ -45,7 +45,7 @@ class FixtureGeneratorAgent(BaseAgent):
     def model(self) -> str:  # type: ignore[override]
         # Read at access time so settings changes flow through. Same pattern
         # as QualityJudgeAgent / FinanceAgent.
-        return get_settings().default_model
+        return default_model()
 
     def get_system_prompt(self) -> str:
         return FIXTURE_GENERATOR_SYSTEM

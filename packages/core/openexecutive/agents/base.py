@@ -10,6 +10,33 @@ from openexecutive.providers import get_provider, model_supports_deep_reasoning
 
 _SPECIALIST_TIMEOUT = 180.0
 
+
+def _apply_effort(create_kwargs: dict[str, Any], *, model: str, use_deep: bool) -> None:
+    """Add the thinking / effort fields for one specialist call.
+
+    Deep reasoning: adaptive thinking with effort capped via
+    ``output_config.effort`` — ``SPECIALIST_EFFORT``, default "low" (adaptive
+    at default effort routinely burned 20k+ thinking tokens; "low" still
+    leaves room for nuanced reasoning while being ~3x faster).
+
+    Settings → Speed "faster" asks for effort "low" on every call to a model
+    that takes it, deep reasoning or not, overriding ``SPECIALIST_EFFORT``.
+    "standard" adds nothing beyond the deep-reasoning fields, so those calls
+    are unchanged. Haiku rejects both fields (``model_supports_deep_reasoning``).
+    """
+    if not model_supports_deep_reasoning(model):
+        return
+    from openexecutive.memory.workspace_settings import effective_speed
+
+    faster = effective_speed() == "faster"
+    if use_deep:
+        create_kwargs["thinking"] = {"type": "adaptive"}
+        effort = "low" if faster else get_settings().specialist_effort
+        create_kwargs["output_config"] = {"effort": effort}
+        create_kwargs["max_tokens"] = max(create_kwargs["max_tokens"], 16000)
+    elif faster:
+        create_kwargs["output_config"] = {"effort": "low"}
+
 logger = logging.getLogger(__name__)
 
 
@@ -72,8 +99,6 @@ class BaseAgent(ABC):
         (``specialist`` for chat-turn consults, ``specialist_workflow`` for
         workflow steps); the Council test box passes ``agent_test``.
         """
-        settings = get_settings()
-
         # Resolution order: explicit kwarg (for sandbox/test calls) → DB
         # override → class default. Keeping the override read inside this
         # method means a fresh DB row takes effect on the next request
@@ -161,15 +186,8 @@ class BaseAgent(ABC):
             "messages": [{"role": "user", "content": user_content}],
         }
 
-        if use_deep and model_supports_deep_reasoning(model):
-            # Adaptive thinking with effort capped via
-            # output_config.effort. Default "low" — adaptive at default
-            # effort routinely burned 20k+ thinking tokens. "low" still
-            # leaves room for nuanced reasoning while being ~3x faster.
-            # Tune via SPECIALIST_EFFORT (low / medium / high / xhigh / max).
-            create_kwargs["thinking"] = {"type": "adaptive"}
-            create_kwargs["output_config"] = {"effort": settings.specialist_effort}
-            create_kwargs["max_tokens"] = 16000
+        # Thinking / effort: deep reasoning and Settings → Speed.
+        _apply_effort(create_kwargs, model=model, use_deep=use_deep)
 
         # Resolve provider per-call by model so a Council UI override that
         # flips this agent to a non-Anthropic slug routes correctly. Today
@@ -235,7 +253,6 @@ class BaseAgent(ABC):
         for the call (``specialist_research``, ``query_watch``, …), which is
         what the per-source usage breakdown groups on.
         """
-        settings = get_settings()
         system_prompt = self.effective_system_prompt() + (
             system_addendum or ""
         )
@@ -265,10 +282,7 @@ class BaseAgent(ABC):
             "messages": [{"role": "user", "content": user_content}],
         }
 
-        if use_deep and model_supports_deep_reasoning(model):
-            create_kwargs["thinking"] = {"type": "adaptive"}
-            create_kwargs["output_config"] = {"effort": settings.specialist_effort}
-            create_kwargs["max_tokens"] = max(max_tokens, 16000)
+        _apply_effort(create_kwargs, model=model, use_deep=use_deep)
 
         provider = get_provider(model)
         message = await provider.messages_create(**create_kwargs)

@@ -10,7 +10,7 @@ without a process restart.
 from __future__ import annotations
 
 from openexecutive.agents.base import BaseAgent
-from openexecutive.config import get_settings
+from openexecutive.agents.model_defaults import default_model
 
 
 class QualityJudgeAgent(BaseAgent):
@@ -22,7 +22,7 @@ class QualityJudgeAgent(BaseAgent):
     def model(self) -> str:  # type: ignore[override]
         # Read at access time so settings changes flow through. Same
         # pattern used by FinanceAgent / TriageAgent.
-        return get_settings().default_model
+        return default_model()
 
     def get_system_prompt(self) -> str:
         from openexecutive.prompts.committee_prompts import QUALITY_REVIEWER_SYSTEM
