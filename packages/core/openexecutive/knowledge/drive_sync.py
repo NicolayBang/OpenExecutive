@@ -42,6 +42,7 @@ from openexecutive.knowledge.drive_client import (
     sanitize_drive_id,
     service_account_token_provider,
 )
+from openexecutive.knowledge.isolated import ParserBusy
 from openexecutive.knowledge.loader import extract_text_from_file, ingest_text_sync
 from openexecutive.knowledge.notion_sync import infer_domain
 from openexecutive.knowledge.store import ChromaDBStore
@@ -256,7 +257,9 @@ def _extract(data: bytes, suffix: str) -> str:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / f"file{suffix}"
         path.write_bytes(data)
-        return extract_text_from_file(path)
+        # The same limit as the wait_for below, so the parser's child process
+        # is killed when the sync stops waiting for it.
+        return extract_text_from_file(path, timeout=_EXTRACT_TIMEOUT_S)
 
 
 async def _file_text(client: DriveClient, item: DriveItem) -> str:
@@ -274,6 +277,10 @@ async def _file_text(client: DriveClient, item: DriveItem) -> str:
             asyncio.to_thread(_extract, data, suffix), timeout=_EXTRACT_TIMEOUT_S
         )
     except _Unreadable:
+        raise
+    except ParserBusy:
+        # Never tried: a failure for this tick, fetched again on the next,
+        # not a file recorded unreadable until it changes.
         raise
     except TimeoutError as exc:
         raise _Unreadable(f"text extraction took over {_EXTRACT_TIMEOUT_S:.0f}s") from exc

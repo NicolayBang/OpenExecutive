@@ -1594,6 +1594,104 @@ knowledge:
     attachments in front of the Executive under "From your company documents",
     and it is why isolation belongs in the collection, never in a domain
     value.
+  parse_isolation: |
+    Document parsing runs in a short-lived child process
+    (knowledge.isolated.run_isolated -> `python -m
+    openexecutive.knowledge.isolated`), not in the API process: pdf_reader's
+    text-layer pass (_text_layer) and local OCR (_ocr_pdf), and the PDF /
+    .docx / .doc / .xlsx / .xlsm branches of loader.extract_text_from_file.
+    Why: pypdf's object graph, pdfium bitmaps and the OCR model are hundreds
+    of MB of small allocations, and CPython keeps the arenas, so an
+    in-process parse left its peak in uvicorn for good. Measured on a 34 MB,
+    131-page text-layer PDF through POST /documents: 272 -> 440 MB peak, 378
+    MB after (before); 274 -> 324 MB peak, 318 MB after, all of the rest
+    from embedding (after). A 30-page scan through OCR: 787 MB peak, 446
+    after (before); 297 / 290 (after) — the OCR child itself peaks ~600 MB
+    for the length of the OCR, then exits.
+    Protocol: (module, qualname, args) pickled to the child's stdin (the
+    child trusts its parent); the answer is JSON on stdout, so the API never
+    unpickles anything a parser of a hostile file could have shaped. The
+    child's environment is reduced to PATH, HOME, PYTHONPATH/PYTHONHOME,
+    VIRTUAL_ENV, LD_LIBRARY_PATH, locale and temp-dir variables: no API
+    keys. That is hygiene, not a sandbox: the child runs as the same user
+    and could read /proc/<ppid>/environ, .env or credential files.
+    Bounded output (security review): the child's stdout and stderr go to
+    temp files, never into the API's memory. pypdf logs text taken from the
+    file (e.g. a font's /Encoding name, once per font per page), so a 9 KB
+    crafted PDF logged ~6 MB and a 2000-page one grew a captured stderr by
+    ~85 MB/s until OOM. The child therefore logs nothing
+    (logging.disable, warnings ignored), fd 1 carries only the answer
+    (library output is dup2'd to stderr), only the last 2000 chars of stderr
+    are read back on a failure, and the answer (UTF-8 JSON,
+    ensure_ascii=False, so non-ASCII text is not inflated 6x) is capped at
+    _MAX_ANSWER_BYTES (32 MB): the child swaps a larger one for an
+    AnswerTooLarge error and the parent refuses a larger file unread, both
+    as WorkerStopped. read_pdf_text's note for WorkerStopped: "the PDF could
+    not be read: it was too large or took too long". The answer is encoded
+    with surrogatepass both ways: pypdf decodes some ToUnicode maps with
+    surrogatepass, and strict UTF-8 would lose a whole file over one lone
+    surrogate. RLIMIT_FSIZE (2x the answer cap) bounds what native code can
+    write to the stderr file.
+    A Path source is read more than once (hash, parse, maybe model), so a
+    result is cached only if the file's sha256 is unchanged after the read:
+    an upload rewriting the same name mid-read must not store its text
+    under the old file's hash.
+    Contract kept: read_pdf_text never raises (an exception the caller names
+    in `reraise` — PdfTooLarge, OcrUnavailable — is rebuilt as itself; a
+    child that dies or passes its timeout raises WorkerStopped, which
+    read_pdf_text turns into method "none" with a note); a Word/Excel parse
+    error still raises, as IsolatedError naming the original type.
+    Timeouts: 300 s for the text layer and file extractors, OCR's 240 s
+    budget + 120 s. extract_text_from_file takes a `timeout`: drive_sync
+    passes its own _EXTRACT_TIMEOUT_S (120 s), so the child is killed when
+    the sync's wait_for gives up rather than running on. The page ceiling
+    travels as an argument because the child never sees this process's
+    module state.
+    Concurrency (review): at most _MAX_CHILDREN (2) parser children run at
+    once. A caller waits at most _MAX_SLOT_WAIT_S (30 s) for a slot, and the
+    wait counts against its own timeout, so the call never outlasts the
+    limit its caller set (Drive sync's 120 s still kills the child when its
+    wait_for gives up). No slot in time -> ParserBusy (a WorkerStopped):
+    "never tried", not "unreadable". Without the short wait, two slow files
+    held every other parse, and its executor thread, for 300 s. OCR passes
+    its own two-slot gate (`slots=_ocr_slots`), so a long OCR never holds a
+    slot a quick text-layer parse needs, and waits longer for it
+    (`max_wait=_OCR_MAX_SLOT_WAIT_S`, one OCR budget, 240 s; its timeout
+    covers wait + run).
+    ParserBusy handling: read_pdf_text returns PdfReadResult(busy=True),
+    method "none" (or the thin text layer) with a "server was busy" note,
+    never cached. A busy OCR attempt refunds its own inbound page
+    reservation (by identity, not any of the same size), but only when no
+    request could reach the model: a failed transcription can still have
+    billed its other slices, and refunding those would let a sender run up
+    model spend past the hourly budget.
+    extract_text_from_file_async / ingest_file take `busy_raises`: POST
+    /documents, the preview and intake uploads set it, so a busy PDF raises
+    ParserBusy like a busy Word/Excel parse and they answer 503 with
+    Retry-After, storing and indexing nothing (a re-upload keeps the old
+    chunks and file). Other callers (fixture loader, client slots, boot
+    reconcile) keep the empty result. drive_sync counts ParserBusy as failed
+    for this tick and fetches the file again on the next, instead of
+    recording it unreadable (which would drop its chunks until it changed).
+    Spawn failure (review): only FileNotFoundError / PermissionError (no
+    usable interpreter) falls back to parsing in-process, logged once, and
+    that parse runs outside the slot gate (it cannot be timed out, so a hung
+    one must not hold a slot). Any other OSError (ENOMEM, EAGAIN) is
+    WorkerStopped: memory pressure is exactly when an in-process parse would
+    hurt most.
+    POST /documents, GET /documents/{filename} and intake uploads turn any
+    other IsolatedError from a Word/Excel parse into a 422 ("Could not read
+    <name>: ..."), not a 500. Only IsolatedError.kind (the exception's type)
+    and the repr of the filename are logged: the parser's message can quote
+    the file, and a name could carry CR/LF. Tests that monkeypatch parser internals set isolated.enabled =
+    False; tests/unit/test_isolated.py runs the real child.
+    read_document_text passes read_pdf_text the Path, so the API process
+    hashes the file in 1 MB pieces and only loads it whole when pages go to
+    the model (step 2 of pdf_reading).
+    POST /documents streams the upload to its staging file 1 MB at a time
+    and returns 413 once it passes MAX_UPLOAD_BYTES (50 MB), instead of
+    reading the whole body into memory; the stored copy is copied from the
+    staging file.
   pdf_reading: |
     Scanned / image-only PDFs (no text layer) are read, not returned empty.
     knowledge.pdf_reader.read_pdf_text tries, in order, and never raises:
@@ -1646,7 +1744,7 @@ knowledge:
     entry points; ingest_file (uploads, reconcile_company_docs), the
     /documents/{filename} preview, intake uploads, integrations.attachments,
     the email poller, oe__read_file and read_document all use them. The sync
-    extract_text_from_file is unchanged for its other callers.
+    extract_text_from_file serves its other callers (see parse_isolation).
 
     Where files reach the Executive:
     - web chat / Discord / Telegram / Slack / Google Chat —
