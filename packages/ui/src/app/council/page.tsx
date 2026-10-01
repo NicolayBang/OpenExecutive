@@ -28,6 +28,7 @@ import {
   savePersona,
   testAgent,
 } from "@/lib/api";
+import VoicePicker from "@/components/executive/VoicePicker";
 
 interface DraftState {
   role: string;
@@ -96,6 +97,9 @@ function personaOption(p: PersonaMeta) {
   );
 }
 
+// Remembers, per browser, that the owner prefers the full editor.
+const ADVANCED_KEY = "oe.council.advanced";
+
 function detailToDraft(d: AgentDetail): DraftState {
   return {
     role: d.role,
@@ -135,6 +139,13 @@ export default function CouncilPage() {
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const [presets, setPresets] = useState<QualityPresets | null>(null);
+  // The Council opens in its simple view: Quality, voice and the core
+  // agents with their additional instructions. "Show all agents" lists the
+  // internal ones too; "Advanced" opens the full editor, and this browser
+  // remembers that choice.
+  const [showAll, setShowAll] = useState(false);
+  const [advanced, setAdvanced] = useState(false);
+  const simple = !advanced;
   const [applyingPreset, setApplyingPreset] = useState<QualityPresetId | null>(null);
 
   const [saving, setSaving] = useState(false);
@@ -187,6 +198,38 @@ export default function CouncilPage() {
     refreshAgents();
     listPersonas().then(setPersonas).catch(() => {});
   }, [refreshAgents]);
+
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(ADVANCED_KEY) === "1") setAdvanced(true);
+    } catch {
+      // Storage can be blocked; the page then opens in the simple view.
+    }
+  }, []);
+
+  const toggleAdvanced = () => {
+    const next = !advanced;
+    setAdvanced(next);
+    try {
+      window.localStorage.setItem(ADVANCED_KEY, next ? "1" : "0");
+    } catch {
+      // Not remembered; the toggle still works for this visit.
+    }
+    if (!selected) return;
+    // The simple view's voice card saves on its own, so pick up the stored
+    // voice. Unsaved edits stay in the draft; only a clean draft is reloaded.
+    const keepDraft = dirty;
+    getAgentDetail(selected)
+      .then((d) => {
+        setDetail(d);
+        setDraft((prev) =>
+          keepDraft && prev ? { ...prev, voice_persona_slug: d.voice_persona_slug ?? null } : detailToDraft(d),
+        );
+      })
+      .catch(() => {});
+  };
+
+  const listedAgents = simple && !showAll ? agents.filter((a) => a.visibility === "core") : agents;
 
   useEffect(() => {
     if (selected) loadDetail(selected);
@@ -388,7 +431,7 @@ export default function CouncilPage() {
             Agent Council
           </p>
           <nav className="space-y-0.5">
-            {agents.map((a) => (
+            {listedAgents.map((a) => (
               <button
                 key={a.name}
                 onClick={() => setSelected(a.name)}
@@ -421,16 +464,33 @@ export default function CouncilPage() {
               </button>
             ))}
           </nav>
+          {simple && (
+            <button
+              onClick={() => setShowAll((v) => !v)}
+              className="mt-3 px-2 text-[11px] text-fg-muted hover:text-fg underline underline-offset-2"
+            >
+              {showAll ? "Show fewer agents" : "Show all agents"}
+            </button>
+          )}
         </div>
       </aside>
 
       <main className="flex-1 overflow-y-auto">
         <div className="max-w-4xl mx-auto px-8 py-10 space-y-6">
           <div>
-            <h1 className="text-2xl font-bold text-fg">Agent Council</h1>
+            <div className="flex items-start justify-between gap-4">
+              <h1 className="text-2xl font-bold text-fg">Agent Council</h1>
+              <button
+                onClick={toggleAdvanced}
+                className="mt-1 text-xs text-fg-muted hover:text-fg underline underline-offset-2"
+              >
+                {advanced ? "Back to simple view" : "Advanced"}
+              </button>
+            </div>
             <p className="mt-2 text-sm text-fg-muted">
-              Edit each specialist&apos;s prompt, model, and behavior. Changes apply on the next
-              specialist call — no restart needed. Resetting restores the built-in defaults.
+              {simple
+                ? "Pick how thorough answers should be, how your Executive sounds, and add instructions for any agent. Changes apply on the next message."
+                : "Edit each specialist\u2019s prompt, model, and behavior. Changes apply on the next specialist call — no restart needed. Resetting restores the built-in defaults."}
             </p>
           </div>
 
@@ -490,7 +550,67 @@ export default function CouncilPage() {
             </section>
           )}
 
-          {detail && draft ? (
+          {simple && (
+            <section className="rounded-xl border border-line bg-surface px-6 py-5 space-y-3">
+              <h2 className="text-sm font-semibold text-fg">Voice</h2>
+              <VoicePicker variant="card" />
+            </section>
+          )}
+
+          {simple && detail && draft && (
+            <section className="rounded-xl border border-line bg-surface px-6 py-5 space-y-4">
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <h2 className="text-lg font-semibold text-fg">{detail.role}</h2>
+                  <span
+                    className="mt-1 inline-block text-[10px] px-2 py-0.5 rounded bg-surface-overlay text-fg-muted font-mono"
+                    title="Set by the Quality choice above, or per agent under Advanced"
+                  >
+                    {currentModel?.label ?? draft.model}
+                    {draft.deep_reasoning && modelSupportsDeepReasoning(draft.model) ? " · deep reasoning" : ""}
+                  </span>
+                </div>
+                <button
+                  onClick={handleSave}
+                  disabled={saving || !dirty}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {saving ? "Saving…" : "Save"}
+                </button>
+              </div>
+              {detail.name === "utility_fast" || detail.name === "research" ? (
+                <p className="text-xs text-fg-muted">
+                  This agent has no instructions to edit. Its model follows the Quality choice;
+                  change it on its own under Advanced.
+                </p>
+              ) : (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-fg-muted uppercase tracking-widest text-[10px] font-semibold">
+                      Additional instructions
+                    </span>
+                    <span className="text-[10px] text-fg-subtle">
+                      {draft.instructions.length} / {INSTRUCTIONS_MAX_CHARS} chars
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-fg-subtle mb-1 leading-relaxed">
+                    Added to this agent&apos;s built-in prompt on every call, so it keeps getting
+                    our prompt improvements.
+                  </p>
+                  <textarea
+                    value={draft.instructions}
+                    onChange={(e) => setDraft({ ...draft, instructions: e.target.value })}
+                    maxLength={INSTRUCTIONS_MAX_CHARS}
+                    rows={5}
+                    placeholder="e.g. Always quote figures in EUR."
+                    className="w-full text-xs px-3 py-2 rounded-lg bg-surface border border-line text-fg focus:border-indigo-500/40 focus:outline-none resize-y leading-relaxed"
+                  />
+                </div>
+              )}
+            </section>
+          )}
+
+          {!simple && (detail && draft ? (
             <div className="space-y-6">
               <div className="rounded-xl border border-line bg-surface px-6 py-5 space-y-4">
                 <div className="flex items-center justify-between">
@@ -1022,7 +1142,7 @@ export default function CouncilPage() {
             </div>
           ) : (
             <p className="text-sm text-fg-muted">Select an agent to edit.</p>
-          )}
+          ))}
         </div>
       </main>
     </div>

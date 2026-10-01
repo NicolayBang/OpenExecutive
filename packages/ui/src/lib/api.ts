@@ -2637,6 +2637,9 @@ export interface AgentMeta {
   deep_reasoning: boolean;
   domains: string[];
   has_override: boolean;
+  // "core": the Executive and the domain specialists (listed in the simple
+  // view). "internal": triage and the helper agents.
+  visibility: "core" | "internal";
 }
 
 export interface AgentDetail {
