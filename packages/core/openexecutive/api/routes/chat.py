@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from openexecutive.api import caller as api_caller
 from openexecutive.api.models import ChatRequest, PageContext, StopChatRequest
 from openexecutive.audit import log_event as audit_log
-from openexecutive.audit import principal_turn_rows
+from openexecutive.audit import principal_turn_rows, rows_for_person
 from openexecutive.integrations.attachments import build_attachment_output
 from openexecutive.orchestrator.answer_sources import TurnSources
 from openexecutive.orchestrator.debug_events import DebugCollector
@@ -416,6 +416,17 @@ def _is_channel_namespaced(session_id: str) -> bool:
     return ":" in session_id
 
 
+def _mail_private(session_id: str) -> bool:
+    """Whether ``session_id`` is its owner's alone. Fails closed."""
+    from openexecutive.memory.session_store import session_mail_private
+
+    try:
+        return session_mail_private(session_id)
+    except Exception:
+        logger.exception("chat: couldn't read whether session %s is private — treating it as private", session_id)
+        return True
+
+
 def _session_access(
     request: Request, session_id: str, caller_person_id: int | None
 ) -> SessionAccess:
@@ -425,6 +436,10 @@ def _session_access(
     rule as feedback and followup; an ownerless legacy row is the principal's
     alone). The one other way in is having started it in this process: that is
     how an unresolved caller continues their own chat, whose row has no owner.
+    A conversation that read its owner's own mail (Act as me,
+    `session_store.mark_mail_private`) is its owner's alone: not the
+    principal's, unless it is theirs. A check that can't be read refuses
+    everyone but the owner.
 
     - "missing": neither a stored row nor a live chat has that id.
     - "orphaned": a stored row with no owner that nobody in this process
@@ -438,6 +453,12 @@ def _session_access(
     started_here = session_id in _session_starters
     if not exists and not started_here:
         return "missing"
+    if exists and _mail_private(session_id):
+        if owner is not None and caller_person_id == owner:
+            return "allowed"
+        if owner is None and _is_session_starter(request, session_id, caller_person_id):
+            return "allowed"
+        return "forbidden"
     if exists and is_principal_or_self(caller_person_id, owner):
         return "allowed"
     if (not exists or owner is None) and _is_session_starter(
@@ -782,7 +803,13 @@ async def _run_chat_turn(
         turn_id, session.session_id, is_first_turn, len(message),
         len(attachment_blocks or []),
     )
-    with principal_turn_rows(principal_turn):
+    # A conversation that once read the caller's own mail stays theirs: so
+    # does what they say in it (the turn itself is pinned the same way).
+    kept_private = _mail_private(session.session_id)
+    with (
+        principal_turn_rows(principal_turn),
+        rows_for_person(caller_person_id) if kept_private else contextlib.nullcontext(),
+    ):
         audit_log(
             "chat_turn",
             f"User: {message[:200]}",
@@ -917,7 +944,10 @@ async def _run_chat_turn(
     # all raise, and the entry would otherwise be stranded until the registry
     # cap evicted it.
     try:
-        with principal_turn_rows(principal_turn):
+        with (
+            principal_turn_rows(principal_turn),
+            rows_for_person(caller_person_id) if kept_private else contextlib.nullcontext(),
+        ):
             (
                 retrieved_context, episodic_context, peer_memory_context, briefing_context,
             ) = await asyncio.gather(
