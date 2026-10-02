@@ -429,3 +429,60 @@ def test_example_config_commands_are_present_in_the_api_image() -> None:
                 f"not provide (known interpreters: {sorted(_IMAGE_INTERPRETERS)}). "
                 "Install it in docker/Dockerfile or use an absolute path."
             )
+
+
+# ---------------------------------------------------------------------------
+# The example's deny_patterns. extensible-mcp checks each against the qualified
+# name "<server>__<tool>" with fnmatch (filters.py, AccessControlFilter). Many
+# servers prefix their own tool names ("tracker_delete_issue"), which puts the
+# verb mid-name, so "*__delete_*" missed "tracker__tracker_delete_issue" (#321).
+# ---------------------------------------------------------------------------
+
+
+def _example_deny_patterns() -> list[str]:
+    raw: dict[str, Any] = json.loads(_EXAMPLE_CONFIG.read_text())
+    patterns: list[str] = raw["filters"]["access_control"]["deny_patterns"]
+    return patterns
+
+
+def _denied(qualified_name: str) -> bool:
+    import fnmatch
+
+    return any(fnmatch.fnmatch(qualified_name, p) for p in _example_deny_patterns())
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # The verb straight after the server separator.
+        "github__delete_file",
+        "db__drop_table",
+        "infra__destroy_stack",
+        "files__remove_directory",
+        "google_workspace__delete_script_project",
+        # The verb mid-name, behind the server's own prefix.
+        "tracker__tracker_delete_issue",
+        "wiki__wiki_delete_page",
+        "tracker__tracker_remove_issue_link",
+        "db__db_drop_table",
+        "infra__infra_destroy_stack",
+    ],
+)
+def test_example_denies_destructive_tools(name: str) -> None:
+    assert _denied(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "tracker__tracker_get_issue",
+        "tracker__tracker_create_issue",
+        "wiki__wiki_update_page",
+        "google_workspace__search_gmail_messages",
+        "google_workspace__manage_event",
+        "google_workspace__manage_drive_access",
+        "fetch__fetch",
+    ],
+)
+def test_example_leaves_ordinary_tools_callable(name: str) -> None:
+    assert not _denied(name)

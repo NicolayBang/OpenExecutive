@@ -23,7 +23,7 @@
   "filters": {
     "access_control": {
       "deny_patterns": [
-        "*__delete_*", "*__drop_*", "*__destroy_*", "*__remove_*",
+        "*_delete_*", "*_drop_*", "*_destroy_*", "*_remove_*",
         "*delete_email*", "*delete_message*", "*trash*",
         "*delete_file*", "*delete_document*"
       ],

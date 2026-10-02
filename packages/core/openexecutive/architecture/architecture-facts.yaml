@@ -6803,6 +6803,19 @@ integrations:
     the child's env block from its own environment. No separate service, deploy
     credential, or deploy job. See docs/deployment.md.
 
+    Third-party MCP servers and the deny list (#321): no roster egress gate
+    covers a server other than google_workspace; destructive tools are kept
+    out by extensible-mcp's access_control.deny_patterns, matched with fnmatch
+    against "<server>__<tool>". Servers that prefix their own tool names
+    (tracker_delete_issue) put the verb mid-name, which `*__delete_*` missed.
+    INVARIANT: the example's deny patterns are `*_<verb>_*`, not
+    `*__<verb>_*`; test_mcp_gateway.py checks them. An operator's own copy
+    keeps the patterns it was copied with. A third-party server's secrets are
+    NOT added to _FORWARDED_ENV_VARS (that stays vendor-neutral): extensible-mcp
+    resolves $VAR placeholders from a .env next to the config file first, and
+    hands each child only its own env block (docs/deployment.md, "Other MCP
+    servers").
+
     Acting-account pin: workspace-mcp takes the acting Google account per
     call (user_google_email). Nothing checked it, so a model-chosen address
     could open another mailbox the server holds a credential for, or under

@@ -265,6 +265,27 @@ theirs alone: the owner sees only who uses it and how much.
 
 ---
 
+## Other MCP servers (optional)
+
+Any MCP server can be added to `/data/company/mcp_servers.json` next to
+`google_workspace`. Keep two things in mind:
+
+- **Secrets.** The gateway passes the API's environment on to only a fixed set
+  of variables (the Google ones). For another server, put its secrets in a
+  `.env` file next to `mcp_servers.json` (`/data/company/.env`) and name them
+  as `$VAR` placeholders in that server's `env` block. extensible-mcp reads
+  that file and hands each server only its own `env` block.
+- **Deny patterns.** `filters.access_control.deny_patterns` keeps tools out by
+  name, matched against `<server>__<tool>`. The example blocks any tool with
+  `_delete_`, `_remove_`, `_drop_` or `_destroy_` in its name. A config copied
+  from an older example used `*__delete_*` and the like, which miss a server
+  whose tools carry their own prefix (`tracker__tracker_delete_issue`): copy
+  the example's list into yours. Add the server's own risky tools by name too.
+  Only Gmail, Calendar and Drive are checked against the People roster, so
+  start any server that can write in its read-only mode if it has one.
+
+---
+
 ## Operations
 
 ```bash
