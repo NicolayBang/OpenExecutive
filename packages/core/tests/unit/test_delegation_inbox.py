@@ -225,7 +225,7 @@ def models(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         for marker, verdict in seen["verdicts"].items():
             if marker in turn:
                 return dict(verdict)
-        return {"needs_reply": True, "kind": "scheduling", "confidence": 0.9}
+        return {"needs_reply": True, "kind": "scheduling", "asked_of_them": True, "confidence": 0.9}
 
     async def composer(model: str, system: str, turn: str) -> dict[str, Any]:
         seen["composed"].append(turn)
@@ -284,9 +284,9 @@ def test_a_question_from_a_contact_gets_a_draft_and_a_private_card(
     mailbox.add(_msg("m1", "t1", cc=("ben@northpeak.example",)))
     result = _scan(owner, mailbox)
     assert (result.status, result.drafted) == ("ok", 1)
-    # To the sender only, in the thread, as a reply.
+    # To everyone it went to (reply to all), in the thread, as a reply.
     spec = mailbox.specs[0]
-    assert spec.to == [DANA] and spec.cc == [] and spec.thread_id == "t1"
+    assert spec.to == [DANA] and spec.cc == ["ben@northpeak.example"] and spec.thread_id == "t1"
     assert spec.in_reply_to == "<m1@x.example>"
     # The composer was told to commit to nothing new.
     assert "commit to nothing" in models["composed"][0]
@@ -296,6 +296,7 @@ def test_a_question_from_a_contact_gets_a_draft_and_a_private_card(
     payload = inbox.card_payload(cards[0])
     assert payload["private"] is True and payload["draft_id"] == "d1"
     assert payload["relation"] == "contact" and "others_on_thread" in payload["flags"]
+    assert payload["draft_to"] == [DANA, "ben@northpeak.example"]
     assert payload["open_questions"] == ["Can the call move to Friday at 10?"]
     assert "Thursday" in payload["they_wrote"]
     assert _ledger(db)["m1"] == ("drafted", None)
@@ -416,6 +417,100 @@ def test_a_classifier_failure_is_tried_again_then_given_up(
     results = [_scan(owner, mailbox, now=NOW + timedelta(minutes=10 + i)) for i in range(inbox.MAX_ATTEMPTS + 1)]
     assert [r.failed for r in results] == [0] * (inbox.MAX_ATTEMPTS - 1) + [1, 0]
     assert _ledger(db)["m3"] == ("failed", "classify_failed")
+
+
+def test_a_group_email_is_drafted_for_only_when_it_asks_them(
+    db: Path, owner: Any, models: dict[str, Any]
+) -> None:
+    group = [OWNER, "brennan@co.example", "russell@co.example"]
+    models["verdicts"]["Brennan:"] = {
+        "needs_reply": True, "kind": "question", "asked_of_them": False, "confidence": 0.95,
+    }
+    mailbox = FakeInbox()
+    mailbox.add(_msg("m1", "t1", to=group, text="Brennan: can you approach Regions? Thoughts?"))
+    mailbox.add(_msg("m2", "t2", to=group, text="Olivia, can you send the waterfall?", minutes_ago=25))
+    mailbox.add(_msg("m3", "t3", to=["brennan@co.example"], cc=(OWNER,), text="Olivia, thoughts?", minutes_ago=20))
+    _scan(owner, mailbox)
+    ledger = _ledger(db)
+    assert ledger["m1"] == ("not_needed", "asks_someone_else")
+    assert ledger["m2"][0] == "drafted"
+    # Only copied: never theirs to answer, whatever the model says.
+    assert ledger["m3"] == ("not_needed", "asks_someone_else")
+    turns = models["classified"]
+    assert any("This person: Olivia Owner, in To\nAlso addressed: 2 other people" in t for t in turns)
+    assert any("This person: Olivia Owner, in Cc\nAlso addressed: 1 other people" in t for t in turns)
+
+
+def test_reply_to_all_never_copies_the_person_or_the_executive_and_spares_strangers(
+    db: Path, owner: Any, models: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openexecutive.config import get_settings
+
+    exec_address = (get_settings().exec_email_address or "").lower()
+    mailbox = FakeInbox()
+    mailbox.add(_msg("m1", "t1", to=[OWNER, "ben@co.example"], cc=(exec_address,)))
+    stranger = "sam@unknown.example"
+    mailbox.add(_msg("m2", "t2", sender=stranger, to=[OWNER, "ben@co.example"], minutes_ago=25))
+    _scan(owner, mailbox)
+    by_thread = {spec.thread_id: spec for spec in mailbox.specs}
+    assert by_thread["t1"].cc == ["ben@co.example"]
+    assert by_thread["t2"].to == [stranger] and by_thread["t2"].cc == []
+
+
+def test_the_eval_path_counts_recipients_as_the_scan_does(owner: Any, models: dict[str, Any]) -> None:
+    # Only the Executive copied: not a group email, on the scan or in reply_for.
+    from openexecutive.config import get_settings
+
+    exec_address = (get_settings().exec_email_address or "").lower()
+    models["verdicts"]["Thursday"] = {
+        "needs_reply": True, "kind": "scheduling", "asked_of_them": False, "confidence": 0.9,
+    }
+    message = _msg("m1", "t1", cc=(exec_address,))
+    thread = MailThread(id="t1", messages=[message])
+    verdict, reply = asyncio.run(inbox.reply_for(owner, message, thread, relation="contact", own={OWNER}))
+    assert verdict is not None and isinstance(reply, inbox.Reply) and reply.cc == []
+
+
+def test_reply_to_all_is_trimmed_to_the_send_limit_and_flagged(owner: Any, models: dict[str, Any]) -> None:
+    # The scan skips mail this wide; the eval path still writes it, trimmed.
+    others = [f"p{i}@co.example" for i in range(11)]
+    message = _msg("m1", "t1", to=[OWNER, *others], text="Olivia, can you send the waterfall?")
+    thread = MailThread(id="t1", messages=[message])
+    _, reply = asyncio.run(inbox.reply_for(owner, message, thread, relation="contact", own={OWNER}))
+    assert isinstance(reply, inbox.Reply)
+    assert reply.cc == others[: inbox.MAX_RECIPIENTS - 1] and "cc_trimmed" in reply.flags
+    assert len([*reply.to, *reply.cc]) == inbox.MAX_RECIPIENTS
+
+
+def test_only_a_real_true_counts_as_asked_of_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def says(model: str, turn: str) -> dict[str, Any]:
+        return {"needs_reply": True, "kind": "question", "asked_of_them": "true", "confidence": 0.9}
+
+    monkeypatch.setattr(ic, "_call_model", says)
+    verdict = asyncio.run(ic.classify(_msg("m1", "t1"), relation="team"))
+    assert verdict is not None and verdict.asked_of_them is False
+
+
+def test_someone_only_copied_never_gets_a_draft() -> None:
+    verdict = ic.Verdict(needs_reply=True, kind="question", confidence=0.95, asked_of_them=True)
+    assert ic.wants_draft(verdict, "team", ic.Addressing(name="Olivia", position="to", others=1)) is True
+    assert ic.wants_draft(verdict, "team", ic.Addressing(name="Olivia", position="cc", others=1)) is False
+    # Copied on mail to the Executive alone: nobody else, still not theirs.
+    assert ic.wants_draft(verdict, "team", ic.Addressing(name="Olivia", position="cc", others=0)) is False
+    assert ic.wants_draft(verdict, "team", ic.Addressing(name="Olivia", position="", others=0)) is False
+
+
+def test_mail_to_the_executive_that_copies_them_gets_no_draft(
+    db: Path, owner: Any, models: dict[str, Any]
+) -> None:
+    from openexecutive.config import get_settings
+
+    exec_address = (get_settings().exec_email_address or "").lower()
+    mailbox = FakeInbox()
+    mailbox.add(_msg("m1", "t1", to=[exec_address], cc=(OWNER,)))
+    _scan(owner, mailbox)
+    assert _ledger(db)["m1"] == ("not_needed", "asks_someone_else")
+    assert mailbox.specs == []
 
 
 def test_a_stranger_needs_more_certainty_and_gets_a_holding_reply(
