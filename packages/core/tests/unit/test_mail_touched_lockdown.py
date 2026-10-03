@@ -20,6 +20,7 @@ from openexecutive.delegation.settings import DelegationOverride, TurnDelegation
 from openexecutive.memory import episodic
 from openexecutive.orchestrator import executive as ex
 from openexecutive.orchestrator.delegation_tools import DELEGATION_TOOLS
+from openexecutive.orchestrator.history_tools import HISTORY_TOOLS
 from openexecutive.orchestrator.mcp_gateway import MCP_TOOLS
 from openexecutive.orchestrator.router import SPECIALIST_TOOLS
 from openexecutive.orchestrator.schedule_tools import PRIVATE_TURN_MCP_TOOLS, current_session
@@ -124,7 +125,7 @@ def _tool_results(call: dict[str, Any]) -> dict[str, str]:
 def test_every_tool_is_classified_once() -> None:
     names = {
         t["name"]
-        for t in [*ex._ALL_SKILL_TOOLS, *SPECIALIST_TOOLS, *MCP_TOOLS, *DELEGATION_TOOLS]
+        for t in [*ex._ALL_SKILL_TOOLS, *SPECIALIST_TOOLS, *MCP_TOOLS, *DELEGATION_TOOLS, *HISTORY_TOOLS]
     }
     allowed, withheld = lockdown.MAIL_TOUCHED_ALLOWED_TOOLS, lockdown.MAIL_TOUCHED_WITHHELD_TOOLS
     assert not allowed & withheld
@@ -168,6 +169,16 @@ def test_a_send_in_the_same_round_is_refused_too(sent: list[dict[str, Any]]) -> 
     results = _tool_results(calls[1])
     assert json.loads(results["tu1"])["status"] == "drafted"
     assert "read the user's own mail" in json.loads(results["tu2"])["error"]
+
+
+def test_a_send_beside_a_notes_recall_is_refused(sent: list[dict[str, Any]]) -> None:
+    # Reading the speaker's own notes locks the turn the same way, from the
+    # round that asks for them.
+    _turn([
+        ToolUseBlock("tu1", "recall_history", {}),
+        ToolUseBlock("tu2", "send_slack_dm", SLACK),
+    ])
+    assert sent == []
 
 
 def test_a_turn_that_read_no_mail_still_sends(sent: list[dict[str, Any]]) -> None:
