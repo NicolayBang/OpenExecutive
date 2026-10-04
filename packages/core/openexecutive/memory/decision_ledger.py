@@ -8,6 +8,8 @@ powers the Proposals UI and the promotion evaluator (Build 3).
 Status state-machine (valid transitions only; enforced by compare-and-set):
   proposed → approved_unchanged | approved_with_edit | rejected | auto_no_response | failed
   proposed → executing → approved_unchanged | approved_with_edit | failed
+                       → executed     (an auto_execute row acted on its own:
+                                       Handle it for me's replies)
                        → proposed     (release_claim: nothing was done)
   proposed | executing → closed_externally  (settled outside the app)
   executed  → reversed | failed        (auto-execute path, Build 3)
@@ -244,7 +246,7 @@ def claim_for_execution(
 
 
 _FINISHED_STATUSES = frozenset({
-    STATUS_APPROVED_UNCHANGED, STATUS_APPROVED_WITH_EDIT, STATUS_FAILED,
+    STATUS_APPROVED_UNCHANGED, STATUS_APPROVED_WITH_EDIT, STATUS_EXECUTED, STATUS_FAILED,
 })
 
 
@@ -256,8 +258,9 @@ def finish_execution(
     external_event_id: str | None = None,
     db_path: Path | None = None,
 ) -> bool:
-    """executing → approved_unchanged | approved_with_edit | failed,
-    compare-and-set. The resolver was recorded when it was claimed."""
+    """executing → approved_unchanged | approved_with_edit | executed |
+    failed, compare-and-set. The resolver was recorded when it was claimed
+    (none for ``executed``: nobody tapped, the class's mode acted)."""
     if status not in _FINISHED_STATUSES:
         raise ValueError(f"not a status an execution finishes in: {status!r}")
     now = datetime.now(UTC).isoformat()
@@ -286,6 +289,20 @@ def release_claim(instance_id: int, db_path: Path | None = None) -> bool:
             "UPDATE decision_instances SET status = ?, resolver_person_id = NULL "
             "WHERE id = ? AND status = ?",
             (STATUS_PROPOSED, instance_id, STATUS_EXECUTING),
+        )
+        return result.rowcount == 1
+
+
+def hand_back(instance_id: int, proposed_payload: dict[str, Any], db_path: Path | None = None) -> bool:
+    """An ``auto_execute`` row that will not act on its own after all becomes
+    an ordinary ``propose`` row, waiting on its approver, with the payload
+    saying why. Compare-and-set on proposed + auto_execute, so a row that
+    was claimed, acted on or closed meanwhile is left alone."""
+    with _get_conn(db_path or _db_path()) as conn:
+        result = conn.execute(
+            "UPDATE decision_instances SET gate_mode = 'propose', proposed_payload_json = ? "
+            "WHERE id = ? AND status = ? AND gate_mode = 'auto_execute'",
+            (json.dumps(proposed_payload), instance_id, STATUS_PROPOSED),
         )
         return result.rowcount == 1
 
@@ -385,6 +402,8 @@ def list_instances(
     decision_class: str,
     *,
     status: str | None = None,
+    approver_person_id: int | None = None,
+    resolved_since: str | None = None,
     limit: int = 100,
     db_path: Path | None = None,
 ) -> list[DecisionInstance]:
@@ -393,6 +412,12 @@ def list_instances(
     if status is not None:
         sql += " AND status = ?"
         params.append(status)
+    if approver_person_id is not None:
+        sql += " AND approver_person_id = ?"
+        params.append(approver_person_id)
+    if resolved_since is not None:
+        sql += " AND resolved_at >= ?"
+        params.append(resolved_since)
     sql += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
     with _get_conn(db_path or _db_path()) as conn:
