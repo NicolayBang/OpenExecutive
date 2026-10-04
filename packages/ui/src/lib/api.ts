@@ -1639,16 +1639,20 @@ export interface InboxWatch {
 // Handle it for me: the inbox watcher sends some replies on its own,
 // decided by plain code (delegation/handle_it.py). Each kind of reply has a
 // level; "ask" leaves a card as before.
-export type HandleItLevel = "off" | "ask" | "handle";
+// How much Handle it for me sends on its own (delegation/handle_it.py RULES).
+export type HandleItMode = "careful" | "balanced" | "bold";
 
 export interface HandleIt {
   enabled: boolean;
-  // reply_known (people you know), reply_stranger (a holding reply).
-  levels: Record<string, HandleItLevel>;
+  mode: HandleItMode;
   // Whether this server can tie the switch to you (signed sign-ins or local
   // login); without it nothing is sent on its own.
   available: boolean;
   sent_today: number;
+  // Take the lead as you: the setting gives way to your rules. Only the
+  // owner can have it for now (lead_available).
+  lead?: boolean;
+  lead_available?: boolean;
 }
 
 // One reply sent on its own, yours alone (GET /delegation/handled).
@@ -1661,6 +1665,8 @@ export interface HandledReply {
   body: string;
   open_questions: string[];
   gmail_link: string;
+  // "follow_up": a follow-up to your own unanswered email.
+  source?: string;
 }
 
 // One reply the inbox watcher drafted: a `delegation_reply` decision, yours
@@ -1691,6 +1697,8 @@ export interface ReplyCard {
   gmail_link: string;
   // Why Handle it for me left it for you; absent or "" when it didn't decide.
   waited_because?: string;
+  // "follow_up": the draft chases your own unanswered email.
+  source?: string;
 }
 
 // "How I write": learned from your own sent mail; you can edit and lock it.
@@ -1832,7 +1840,7 @@ export async function setInboxWatch(enabled: boolean): Promise<DelegationSetting
 
 export async function setHandleIt(update: {
   enabled?: boolean;
-  levels?: Record<string, HandleItLevel>;
+  mode?: HandleItMode;
 }): Promise<DelegationSettings> {
   const res = await fetch(`${API_BASE}/delegation/handle-it`, {
     method: "PUT",
@@ -4774,4 +4782,102 @@ export async function updateClientMeta(
     throw new Error(err.detail ?? "Failed to update client");
   }
   return res.json();
+}
+
+// ── Take the lead (Settings → Your Executive) ────────────────
+
+export type LeadRuleKind = "person" | "domain" | "words" | "amount";
+
+export interface LeadRule {
+  id: number;
+  kind: LeadRuleKind;
+  value: string;
+}
+
+export interface TakeTheLead {
+  enabled: boolean;
+  ask_first: { kind: string; label: string; hint: string; on: boolean }[];
+  rules: LeadRule[];
+  available: boolean;
+  paused: boolean;
+}
+
+async function leadError(res: Response, fallback: string): Promise<Error> {
+  try {
+    const body = await res.json();
+    if (typeof body?.detail === "string") return new Error(body.detail);
+    if (typeof body?.detail?.message === "string") return new Error(body.detail.message);
+  } catch {
+    // fall through
+  }
+  return new Error(fallback);
+}
+
+// null for anyone but the owner (403) or a backend without it (404).
+export async function getTakeTheLead(signal?: AbortSignal): Promise<TakeTheLead | null> {
+  const res = await fetch(`${API_BASE}/take-the-lead`, { signal });
+  if (res.status === 403 || res.status === 404) return null;
+  if (!res.ok) throw await leadError(res, "Couldn't load Take the lead.");
+  return res.json();
+}
+
+export async function setTakeTheLead(update: {
+  enabled?: boolean;
+  ask_first?: Record<string, boolean>;
+}): Promise<TakeTheLead> {
+  const res = await fetch(`${API_BASE}/take-the-lead`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+  });
+  if (!res.ok) throw await leadError(res, "Couldn't change Take the lead.");
+  return res.json();
+}
+
+export async function addCompanyLeadRule(kind: LeadRuleKind, value: string): Promise<TakeTheLead> {
+  const res = await fetch(`${API_BASE}/take-the-lead/rules`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind, value }),
+  });
+  if (!res.ok) throw await leadError(res, "Couldn't add the rule.");
+  return res.json();
+}
+
+export async function deleteCompanyLeadRule(id: number): Promise<TakeTheLead> {
+  const res = await fetch(`${API_BASE}/take-the-lead/rules/${id}`, { method: "DELETE" });
+  if (!res.ok) throw await leadError(res, "Couldn't remove the rule.");
+  return res.json();
+}
+
+export async function setLeadAsYou(enabled: boolean): Promise<DelegationSettings> {
+  const res = await fetch(`${API_BASE}/delegation/take-the-lead`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) throw await delegationError(res, "Couldn't change Take the lead as you.");
+  return res.json();
+}
+
+export async function getMyLeadRules(signal?: AbortSignal): Promise<LeadRule[]> {
+  const res = await fetch(`${API_BASE}/delegation/take-the-lead/rules`, { signal });
+  if (!res.ok) throw await delegationError(res, "Couldn't load your rules.");
+  return ((await res.json()) as { rules: LeadRule[] }).rules;
+}
+
+export async function addMyLeadRule(kind: LeadRuleKind, value: string): Promise<LeadRule[]> {
+  const res = await fetch(`${API_BASE}/delegation/take-the-lead/rules`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind, value }),
+  });
+  if (!res.ok) throw await delegationError(res, "Couldn't add the rule.");
+  return ((await res.json()) as { rules: LeadRule[] }).rules;
+}
+
+export async function deleteMyLeadRule(id: number): Promise<LeadRule[]> {
+  const res = await fetch(`${API_BASE}/delegation/take-the-lead/rules/${id}`, { method: "DELETE" });
+  if (!res.ok) throw await delegationError(res, "Couldn't remove the rule.");
+  return ((await res.json()) as { rules: LeadRule[] }).rules;
 }

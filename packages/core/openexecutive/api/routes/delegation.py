@@ -28,15 +28,24 @@ Routes:
                                     switch is off or a check is running)
   GET    /delegation/replies      — the reply cards waiting for the caller
                                     (from the database; no Gmail call)
-  PUT    /delegation/handle-it    — {enabled?, levels?}: Handle it for me,
+  PUT    /delegation/handle-it    — {enabled?, mode?}: Handle it for me,
                                     the inbox watcher sending some replies on
-                                    its own (delegation.handle_it). Needs a
+                                    its own, mode careful | balanced | bold
+                                    (delegation.handle_it). Needs a
                                     caller the API knows is that person
                                     (signed sign-ins, or local login: 403 /
                                     409 ``caller_signing_required``), and
                                     turning it on needs Draft replies to my
                                     inbox on (409). Turning the inbox watcher
                                     off turns it off too
+  PUT    /delegation/take-the-lead — {enabled}: Take the lead as you, the
+                                    owner's alone for now: Handle it for
+                                    me's setting gives way to the added rules
+                                    (orchestrator.take_the_lead); turning it
+                                    on turns Handle it for me on
+  GET|POST /delegation/take-the-lead/rules, DELETE …/rules/{id}
+                                  — the caller's own rules for it (removing
+                                    one needs the same provable caller)
   GET    /delegation/handled      — the caller's replies sent on its own in
                                     the last 7 days, with the questions each
                                     left for them
@@ -147,21 +156,48 @@ class TeamOut(BaseModel):
 
 
 class HandleItOut(BaseModel):
-    """Handle it for me: the switch and each kind's level (off, ask, handle)."""
+    """Handle it for me: the switch and its setting (careful, balanced, bold)."""
 
     enabled: bool
-    levels: dict[str, str]
+    mode: str
     # Whether this server can tie the switch to the person (signed sign-ins
     # or local login); without it nothing is sent on its own.
     available: bool
     sent_today: int = 0
+    # Take the lead as you: the setting's limits give way to the added rules
+    # (orchestrator.take_the_lead). Only the owner can have it in this build.
+    lead: bool = False
+    lead_available: bool = False
+
+
+class LeadUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
+class LeadRuleIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str
+    value: str
+
+
+class LeadRuleOut(BaseModel):
+    id: int
+    kind: str
+    value: str
+
+
+class LeadRulesOut(BaseModel):
+    rules: list[LeadRuleOut]
 
 
 class HandleItUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool | None = None
-    levels: dict[str, str] | None = None
+    mode: str | None = None
 
 
 class HandledReplyOut(BaseModel):
@@ -173,6 +209,8 @@ class HandledReplyOut(BaseModel):
     body: str
     open_questions: list[str]
     gmail_link: str
+    # "follow_up" for a follow-up to the caller's own unanswered email.
+    source: str = ""
 
 
 class HandledOut(BaseModel):
@@ -222,6 +260,8 @@ class ReplyCardOut(BaseModel):
     gmail_link: str
     # Why Handle it for me left it for you ("" when it didn't decide).
     waited_because: str = ""
+    # "follow_up": the draft chases the caller's own unanswered email.
+    source: str = ""
 
 
 class RepliesOut(BaseModel):
@@ -391,14 +431,21 @@ def _handle_it_out(person_id: int) -> HandleItOut:
     from datetime import UTC, datetime
 
     from openexecutive.delegation import handle_it
+    from openexecutive.people.store import get_person
 
     stored = handle_it.get(person_id)
     try:
         today = handle_it.sent_today(person_id, datetime.now(UTC))
     except Exception:
         today = 0
+    try:
+        found = get_person(person_id)
+        principal = bool(found is not None and found.is_principal)
+    except Exception:
+        principal = False
     return HandleItOut(
-        enabled=stored.enabled, levels=dict(stored.levels), available=handle_it.signing_ok(), sent_today=today,
+        enabled=stored.enabled, mode=stored.mode, available=handle_it.signing_ok(), sent_today=today,
+        lead=principal and stored.enabled and handle_it.leading(person_id), lead_available=principal,
     )
 
 
@@ -491,7 +538,7 @@ def _set_inbox(person_id: int, enabled: bool) -> None:
 
     if not enabled:
         # Handle it for me sends what the watcher drafts: it goes with it.
-        _set_handle_it(person_id, enabled=False, levels=None)
+        _set_handle_it(person_id, enabled=False, mode=None)
     before = inbox.get_watch(person_id).enabled
     if before == enabled:
         return
@@ -563,19 +610,26 @@ def get_delegation_replies(request: Request) -> RepliesOut:
     ])
 
 
-def _set_handle_it(person_id: int, *, enabled: bool | None, levels: dict[str, str] | None) -> None:
+def _set_handle_it(person_id: int, *, enabled: bool | None, mode: str | None) -> None:
     from openexecutive.delegation import handle_it
+    from openexecutive.orchestrator import take_the_lead
 
+    if enabled is False:
+        # Take the lead as you rides on Handle it; turning it back on later
+        # starts from the dial, not from the lead.
+        scope = take_the_lead.person_scope(person_id)
+        if take_the_lead.get(scope).enabled:
+            take_the_lead.set_(scope, enabled=False, updated_by=f"person:{person_id}")
     before = handle_it.get(person_id)
-    if (enabled is None or enabled == before.enabled) and not levels:
+    if (enabled is None or enabled == before.enabled) and (mode is None or mode == before.mode):
         return
-    after = handle_it.set_(person_id, enabled=enabled, levels=levels, updated_by=f"person:{person_id}")
-    if after.enabled == before.enabled and after.levels == before.levels:
+    after = handle_it.set_(person_id, enabled=enabled, mode=mode, updated_by=f"person:{person_id}")
+    if after.enabled == before.enabled and after.mode == before.mode:
         return
     _audit(
         "delegation_handle_it_changed",
         f"Handle it for me {'on' if after.enabled else 'off'} for person {person_id}",
-        {"person_id": person_id, "enabled": after.enabled, "levels": after.levels},
+        {"person_id": person_id, "enabled": after.enabled, "mode": after.mode},
     )
 
 
@@ -592,23 +646,112 @@ async def update_delegation_handle_it(request: Request, body: HandleItUpdate) ->
         raise _refuse(403, "not_yours", "Only you can change Handle it for me.")
     # Turning it off only narrows what the watcher does, so it stays
     # possible after the server loses signed sign-ins.
-    turning_off = body.enabled is False and not body.levels
+    turning_off = body.enabled is False and body.mode is None
     if refused is not None and not turning_off:
         raise _refuse(
             409, "caller_signing_required",
             "Handle it for me needs signed sign-ins on this server, so that nobody else can turn it on for you.",
         )
-    levels = body.levels or {}
-    for kind, level in levels.items():
-        if kind not in handle_it.KINDS or level not in handle_it.LEVELS:
-            raise _refuse(422, "bad_level", f"Unknown kind or level: {kind}={level}.")
+    if body.mode is not None and body.mode not in handle_it.MODES:
+        raise _refuse(422, "bad_mode", f"Unknown setting: {body.mode}.")
     if body.enabled:
         if not is_enabled(person_id):
             raise _refuse(409, "act_as_me_off", "Turn Act as me on first.")
         if not inbox.get_watch(person_id).enabled:
             raise _refuse(409, "inbox_off", "Turn on Draft replies to my inbox first.")
-    _set_handle_it(person_id, enabled=body.enabled, levels=levels or None)
+    _set_handle_it(person_id, enabled=body.enabled, mode=body.mode)
     return await _state(person)
+
+
+def _signed_caller(request: Request, *, narrowing: bool) -> Person:
+    """The caller, when this request is provably theirs; turning something
+    off (``narrowing``) stays possible without signed sign-ins."""
+    from openexecutive.delegation.gmail import normalize_email
+    from openexecutive.delegation.verified import NOT_YOURS, caller_refusal
+
+    person = _caller(request)
+    refused = caller_refusal(api_caller.caller(request), normalize_email(person.email or ""))
+    if refused == NOT_YOURS:
+        raise _refuse(403, "not_yours", "Only you can change this.")
+    if refused is not None and not narrowing:
+        raise _refuse(
+            409, "caller_signing_required",
+            "This needs signed sign-ins on this server, so that nobody else can turn it on for you.",
+        )
+    return person
+
+
+@router.put("/delegation/take-the-lead", response_model=DelegationOut)
+async def update_take_the_lead_as_you(request: Request, body: LeadUpdate) -> DelegationOut:
+    """Take the lead as you: the owner's own switch. Turning it on turns on
+    Handle it for me too; turning it off leaves Handle it as it was."""
+    from openexecutive.delegation import inbox
+    from openexecutive.orchestrator import take_the_lead
+
+    person = _signed_caller(request, narrowing=not body.enabled)
+    person_id = _person_id(person)
+    if not person.is_principal:
+        raise _refuse(403, "owner_only", "Only the account owner can use Take the lead for now.")
+    if body.enabled:
+        if not is_enabled(person_id):
+            raise _refuse(409, "act_as_me_off", "Turn Act as me on first.")
+        if not inbox.get_watch(person_id).enabled:
+            raise _refuse(409, "inbox_off", "Turn on Draft replies to my inbox first.")
+        _set_handle_it(person_id, enabled=True, mode=None)
+    scope = take_the_lead.person_scope(person_id)
+    before = take_the_lead.get(scope).enabled
+    take_the_lead.set_(scope, enabled=body.enabled, updated_by=f"person:{person_id}")
+    if before != body.enabled:
+        _audit(
+            "take_the_lead_changed",
+            f"Take the lead as you {'on' if body.enabled else 'off'} for person {person_id}",
+            {"person_id": person_id, "scope": "as_you", "enabled": body.enabled},
+        )
+    return await _state(person)
+
+
+def _rules_out(person_id: int) -> LeadRulesOut:
+    from openexecutive.orchestrator import take_the_lead
+
+    try:
+        rules = take_the_lead.list_rules([take_the_lead.person_scope(person_id)])
+    except Exception as exc:
+        raise _refuse(503, "unavailable", "Couldn't read your rules.") from exc
+    return LeadRulesOut(rules=[LeadRuleOut(id=r.id, kind=r.kind, value=r.value) for r in rules])
+
+
+@router.get("/delegation/take-the-lead/rules", response_model=LeadRulesOut)
+def get_my_lead_rules(request: Request) -> LeadRulesOut:
+    """The caller's own rules for Take the lead as you."""
+    return _rules_out(_person_id(_caller(request)))
+
+
+@router.post("/delegation/take-the-lead/rules", response_model=LeadRulesOut)
+def add_my_lead_rule(request: Request, body: LeadRuleIn) -> LeadRulesOut:
+    from openexecutive.orchestrator import take_the_lead
+
+    # Adding a rule only holds more back, but it is still theirs alone.
+    person = _signed_caller(request, narrowing=True)
+    person_id = _person_id(person)
+    try:
+        take_the_lead.add_rule(
+            take_the_lead.person_scope(person_id), body.kind, body.value, created_by=f"person:{person_id}",
+        )
+    except take_the_lead.RuleError as exc:
+        raise _refuse(422, "bad_rule", str(exc)) from None
+    return _rules_out(person_id)
+
+
+@router.delete("/delegation/take-the-lead/rules/{rule_id}", response_model=LeadRulesOut)
+def delete_my_lead_rule(request: Request, rule_id: int) -> LeadRulesOut:
+    from openexecutive.orchestrator import take_the_lead
+
+    # Removing a rule lets more go, so it needs the request to be provably theirs.
+    person = _signed_caller(request, narrowing=False)
+    person_id = _person_id(person)
+    if not take_the_lead.delete_rule(rule_id, take_the_lead.person_scope(person_id)):
+        raise _refuse(404, "not_found", "That rule isn't there.")
+    return _rules_out(person_id)
 
 
 @router.get("/delegation/handled", response_model=HandledOut)
@@ -631,6 +774,7 @@ def get_delegation_handled(request: Request) -> HandledOut:
             decision_id=h.decision_id, sent_at=h.sent_at, to_name=h.to_name, to_email=h.to_email,
             subject=h.subject, body=h.body, open_questions=h.open_questions,
             gmail_link=mailbox_link(email, thread_id=h.thread_id) if email and h.thread_id else "",
+            source=h.source,
         )
         for h in found
     ])

@@ -6,6 +6,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 
 import { useExecutiveStatus } from "@/components/executive/ExecutiveStatusContext";
 import Icon from "@/components/Icon";
+import { HANDLE_IT_MODES } from "@/components/settings/HandleItCard";
 import { MODE_LABEL } from "@/components/settings/WorkspaceCard";
 import {
   ADVANCED_ITEMS,
@@ -198,6 +199,11 @@ function useTileStatuses(): {
             tone: "ok",
           }
         : { text: "Mailbox not connected", tone: "warn" };
+    const handleIt = delegation.handle_it;
+    if (handleIt?.enabled) {
+      const mode = HANDLE_IT_MODES.find((m) => m.mode === handleIt.mode)?.label ?? "On";
+      byPage["act-as-me"] = { text: `${byPage["act-as-me"]?.text} · Handle it for me · ${mode}`, tone: "ok" };
+    }
   }
 
   if (history && history !== "error") {

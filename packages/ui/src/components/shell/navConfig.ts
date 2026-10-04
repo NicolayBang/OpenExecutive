@@ -416,15 +416,15 @@ export const SETTINGS_PAGES: SettingsPageDef[] = [
     label: "Your Executive",
     href: "/settings/executive",
     icon: "cog",
-    description: "Pause or resume its own work, and the voice it answers in.",
-    hashes: ["executive"],
+    description: "Pause it, what it does without asking you, and the voice it answers in.",
+    hashes: ["executive", "on-its-own"],
   },
   {
     id: "act-as-me",
     label: "Act as me",
     href: "/settings/act-as-me",
     icon: "mail",
-    description: "Your mailbox, drafts written as you, and how you write.",
+    description: "Your mailbox, drafts and replies sent as you, and how you write.",
     hashes: ["act-as-me"],
   },
   {
@@ -440,7 +440,7 @@ export const SETTINGS_PAGES: SettingsPageDef[] = [
     label: "Workspace",
     href: "/settings/workspace",
     icon: "building",
-    description: "Just you or your team, time zone, meeting booking, email domains.",
+    description: "Just you or your team, time zone, email domains.",
     hashes: ["workspace"],
   },
   {
