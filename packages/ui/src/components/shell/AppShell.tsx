@@ -12,6 +12,7 @@ import AppSidebar from "@/components/shell/AppSidebar";
 import {
   buildMobilePrimary,
   hubForPath,
+  isAdvancedPath,
   isDestinationActive,
   PROFILE_NAV,
   profileWording,
@@ -148,7 +149,7 @@ function TopBar({
   // navigable pages, so we render them as plain text to avoid linking
   // to a 404. Dynamic segments (slugs/uuids) also render as-is — pages
   // own their own H1 with the entity name.
-  const crumbs = segments.map((segment, idx) => {
+  const pageCrumbs = segments.map((segment, idx) => {
     const linkable = idx === 0;
     const href = linkable ? "/" + segment : null;
     return {
@@ -156,6 +157,11 @@ function TopBar({
       label: idx === 0 && segment === "company-profile" ? profileLabel : labelFor(segment),
     };
   });
+  // The Advanced pages (Agent Council, Audit log, ...) live at their own
+  // paths but are opened from Settings → Advanced: show that way back.
+  const crumbs: { href: string | null; label: string }[] = isAdvancedPath("/" + segments.join("/"))
+    ? [{ href: "/settings", label: "Settings" }, { href: "/settings/advanced", label: "Advanced" }, ...pageCrumbs]
+    : pageCrumbs;
 
   return (
     <header className="h-14 border-b border-line flex items-center justify-between px-4 sm:px-6 flex-shrink-0 gap-3">
@@ -170,14 +176,24 @@ function TopBar({
         </button>
         <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 min-w-0">
           {crumbs.length === 0 ? (
-            <span className="text-sm text-fg-muted">Open Executive</span>
+            <span className="font-display text-[15px] font-extrabold tracking-tight text-fg">Open Executive</span>
           ) : (
             crumbs.map((c, i) => {
               const isLast = i === crumbs.length - 1;
+              // Phones show only the last two crumbs, so they don't all
+              // truncate to a few letters each.
+              const fromEnd = crumbs.length - i;
               return (
-                <span key={`${i}-${c.label}`} className="flex items-center gap-1.5 min-w-0">
+                <span
+                  key={`${i}-${c.label}`}
+                  className={`${fromEnd > 2 ? "hidden sm:flex" : "flex"} items-center gap-1.5 min-w-0`}
+                >
                   {i > 0 && (
-                    <Icon name="chevron-right" size="w-3 h-3" className="text-fg-subtle flex-shrink-0" />
+                    <Icon
+                      name="chevron-right"
+                      size="w-3 h-3"
+                      className={`text-fg-subtle flex-shrink-0 ${fromEnd === 2 ? "hidden sm:block" : ""}`}
+                    />
                   )}
                   {!isLast && c.href ? (
                     <Link
@@ -216,13 +232,12 @@ function AskOEButton() {
       onClick={toggle}
       title="Ask OE about this page (Ctrl/Cmd + .)"
       aria-pressed={open}
-      className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
-        open
-          ? "bg-indigo-500/15 text-indigo-200"
-          : "text-indigo-300 hover:text-indigo-200 hover:bg-surface-overlay"
+      className={`flex min-h-10 items-center gap-1.5 px-3 rounded-lg text-sm font-semibold text-accent transition-colors cursor-pointer ${
+        open ? "bg-accent/20" : "bg-accent/10 hover:bg-accent/15"
       }`}
     >
-      <Icon name="bolt" size="w-4 h-4" />
+      <Icon name="sparkles" size="w-4 h-4" />
+      <span className="sm:hidden">Ask</span>
       <span className="hidden sm:inline">Ask OE</span>
     </button>
   );

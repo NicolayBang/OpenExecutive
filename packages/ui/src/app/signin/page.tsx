@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { GOOGLE_SIGN_IN, LOCAL_LOGIN, OIDC, auth, sessionStillAllowed, signIn } from "@/auth";
 import { LOCAL_LOGIN_PROVIDER_ID } from "@/lib/localLogin";
 import { OIDC_PROVIDER_ID } from "@/lib/oidc";
+import BrandMark from "@/components/BrandMark";
 
 type SearchParams = Promise<{ callbackUrl?: string; error?: string }>;
 
@@ -35,7 +36,10 @@ export default async function SignInPage({ searchParams }: { searchParams: Searc
   return (
     <main className="min-h-screen flex items-center justify-center px-6">
       <div className="w-full max-w-sm rounded-2xl border border-line bg-surface/60 p-8 shadow-xl">
-        <h1 className="text-xl font-semibold tracking-tight text-fg">Open Executive</h1>
+        <h1 className="flex items-center gap-2.5 font-display text-2xl font-extrabold tracking-tight text-fg">
+          <BrandMark size="sm" />
+          Open Executive
+        </h1>
         <p className="mt-2 text-sm text-fg-muted">
           {LOCAL_LOGIN
             ? "This copy runs on your computer, and only you can reach it — so there’s no sign-in."
@@ -93,7 +97,9 @@ export default async function SignInPage({ searchParams }: { searchParams: Searc
                 </button>
               </form>
             )}
-            {GOOGLE_SIGN_IN && (
+            {/* Google's button only when Google sign-in is set up: without
+                AUTH_GOOGLE_ID it would lead to an error page. */}
+            {GOOGLE_SIGN_IN && googleConfigured && (
               <form
                 action={async () => {
                   "use server";
@@ -107,10 +113,13 @@ export default async function SignInPage({ searchParams }: { searchParams: Searc
               </form>
             )}
             {!googleConfigured && !OIDC && (
-              <p className="mt-4 text-xs text-fg-subtle">
-                Sign-in isn’t set up here yet: set up Google or SSO sign-in (see docs/auth.md). On your own computer,
-                start Open Executive with <code>make dev</code> to use it without signing in.
-              </p>
+              <div className="mt-6 rounded-xl border border-line bg-surface-elevated px-4 py-3">
+                <p className="text-sm font-medium text-fg">Sign-in isn’t set up here yet.</p>
+                <p className="mt-1 text-sm text-fg-muted">
+                  Ask whoever runs Open Executive for you to turn on Google or SSO sign-in.
+                </p>
+                <p className="mt-2 text-xs text-fg-muted">If that’s you: see docs/auth.md.</p>
+              </div>
             )}
           </>
         )}

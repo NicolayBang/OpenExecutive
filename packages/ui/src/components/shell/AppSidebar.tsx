@@ -10,6 +10,7 @@ import { useWorkspace } from "@/components/workspace/WorkspaceContext";
 import {
   buildDestinations,
   isDestinationActive,
+  isAdvancedPath,
   isNavActive,
   NEW_CHAT_DESCRIPTION,
   SETTINGS_NAV_ITEM,
@@ -92,7 +93,7 @@ export default function AppSidebar({
             <BrandMark size="sm" />
           </span>
           <span className="min-w-0">
-            <span className="block text-[15px] font-semibold truncate">Open Executive</span>
+            <span className="block font-display text-[17px] font-extrabold tracking-tight truncate">Open Executive</span>
             {companyName && (
               <span className="block text-xs text-fg-muted truncate">{companyName}</span>
             )}
@@ -152,7 +153,7 @@ export default function AppSidebar({
           label={SETTINGS_NAV_ITEM.label}
           icon={SETTINGS_NAV_ITEM.icon}
           description={SETTINGS_NAV_ITEM.description}
-          active={isNavActive(SETTINGS_NAV_ITEM.href, pathname)}
+          active={isNavActive(SETTINGS_NAV_ITEM.href, pathname) || isAdvancedPath(pathname)}
         />
       </div>
 
