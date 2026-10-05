@@ -252,15 +252,20 @@ def _chat_prompt(request: rr.RosterRequest, acknowledged: bool = True) -> str:
         "they said.\n"
         f"Tell me who {who} is and I'll add them — for example \"that's Annamarie, "
         "add her to the team\", \"add them as a contact\", \"that's <someone already "
-        "on the People list>\", or \"ignore\". The card on your Today page works too."
+        "on the People list>\", or \"ignore\". The card on your Home page works too."
     )
+
+
+def _subject_who(request: rr.RosterRequest) -> str:
+    """Who a request is about, safe for a Subject line: the name comes from the
+    unknown sender, so line breaks are collapsed and its length capped."""
+    return " ".join((request.display_name or request.channel_ref).split())[:80]
 
 
 def _email_prompt(
     request: rr.RosterRequest, token: str, acknowledged: bool = True,
 ) -> tuple[str, str]:
-    subject_who = request.display_name or request.channel_ref
-    subject = f"Who is {subject_who}? [{token}]"
+    subject = f"Who is {_subject_who(request)}? [{token}]"
     body = (
         f"{rr.describe(request)}.\n\n"
         f"{_told(acknowledged)}. I haven't replied to what they said.\n\n"
@@ -270,7 +275,7 @@ def _email_prompt(
         "  - \"Add them as a contact\"\n"
         "  - \"That's <someone already on the People list>\"\n"
         "  - \"Ignore\"\n\n"
-        "Or use the card on your Today page.\n\n"
+        "Or use the card on your Home page.\n\n"
         f"(Reference {token} — keep it in your reply. It works once.)"
     )
     return subject, body
@@ -660,7 +665,7 @@ async def _apply_answer(request: rr.RosterRequest, text: str, *, via: str) -> st
         if ambiguous:
             return (
                 f"More than one person on your People list is called {name}, so "
-                "they're still waiting. Use the full name, or the card on your Today page."
+                "they're still waiting. Use the full name, or the card on your Home page."
             )
         if person is not None and person.id is not None:
             await answer(request.id, "link", via=via, link_person_id=person.id)
@@ -668,7 +673,7 @@ async def _apply_answer(request: rr.RosterRequest, text: str, *, via: str) -> st
         if decision == "link":
             return (
                 f"I couldn't find {name or 'that person'} on your People list, so "
-                "they're still waiting. Use their full name, or the card on your Today page."
+                "they're still waiting. Use their full name, or the card on your Home page."
             )
         full_name = name or request.display_name
         if not full_name:
@@ -690,7 +695,7 @@ async def _reply_to_principal(gateway: Any, to: str, request: rr.RosterRequest, 
     try:
         with set_session(None):
             await send_from_executive(
-                gateway, to=to, subject=f"Re: roster request {request.id}", body=text,
+                gateway, to=to, subject=f"Re: Who is {_subject_who(request)}?", body=text,
             )
     except Exception:
         logger.warning("roster_intake: replying to the principal failed", exc_info=True)
