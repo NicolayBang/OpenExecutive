@@ -2146,6 +2146,9 @@ export type DynamicStep =
       question: string;
       timeout_hours?: number;
       on_timeout?: "escalate" | "auto_proceed" | "fail";
+      // Anything but approve_reject is a question, not permission: the run
+      // continues whatever the answer.
+      expected_reply_shape?: "approve_reject" | "free_text" | "numeric" | "document";
     }
   | {
       kind: "synthesis";
@@ -2277,6 +2280,29 @@ export async function activateCustomWorkflow(
   return res.json();
 }
 
+/**
+ * Save the draft of a conversation that edits a saved workflow. The server
+ * saves its own copy of the draft, and only if it is `reviewed` (the draft on
+ * screen) and the workflow has not changed since the conversation opened
+ * (409 otherwise).
+ */
+export async function saveWorkflowDesignerEdit(
+  sessionId: string,
+  reviewed: DynamicWorkflowDef
+): Promise<DynamicWorkflowDef> {
+  const name = reviewed.name;
+  const res = await fetch(
+    `${API_BASE}/workflows/custom/${encodeURIComponent(name)}/save-edit`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId, definition: reviewed }),
+    }
+  );
+  if (!res.ok) throw await _customError(res);
+  return res.json();
+}
+
 /** A target a workflow's tool steps may write to without asking again. */
 export interface ApprovedTarget {
   value: string;
@@ -2354,6 +2380,10 @@ export interface WorkflowDesignerTurn {
   options: string[];
   draft: WorkflowDesignerDraft | null;
   transcript: { role: "user" | "assistant"; text: string }[];
+  // Set when the session changes a saved workflow: its name, and the saved
+  // version the draft is compared with. Save with updateCustomWorkflow.
+  editing?: string | null;
+  original?: DynamicWorkflowDef | null;
 }
 
 async function _designerPost(
@@ -2372,6 +2402,11 @@ async function _designerPost(
 
 export function startWorkflowDesigner(message: string): Promise<WorkflowDesignerTurn> {
   return _designerPost("start", { message }, "Could not start the workflow assistant");
+}
+
+/** Open the designer on a saved workflow, to change it by conversation. */
+export function editWorkflowWithDesigner(name: string): Promise<WorkflowDesignerTurn> {
+  return _designerPost("edit", { name }, "Could not open that workflow");
 }
 
 export function sendWorkflowDesignerMessage(
