@@ -9,6 +9,37 @@ From 0.3.0 on, entries are written by release-please from the titles of the
 merged pull requests (`feat` → Added, `fix` → Fixed). The open release PR holds
 the next entry; edit it there before merging if a line needs rewording.
 
+## [0.5.3](https://github.com/SenteLabsAI/OpenExecutive/compare/v0.5.2...v0.5.3) (2026-10-08)
+
+
+### Added
+
+* **agents:** refresh the default models ([#390](https://github.com/SenteLabsAI/OpenExecutive/issues/390)) ([b747bee](https://github.com/SenteLabsAI/OpenExecutive/commit/b747bee881f733792608a5a445fb34ff3fff5288))
+* **chat:** name connected tools in plain words and collapse repeated chips ([#394](https://github.com/SenteLabsAI/OpenExecutive/issues/394)) ([1ce8d97](https://github.com/SenteLabsAI/OpenExecutive/commit/1ce8d972b3f2b3a5ec496750321f5e2c5a7a9505))
+* **delegation:** add reminders and forward-as-draft to Act as me ([#387](https://github.com/SenteLabsAI/OpenExecutive/issues/387)) ([bbfc6c3](https://github.com/SenteLabsAI/OpenExecutive/commit/bbfc6c3d150ee3db51722e618d0a95925e8eded1))
+* **delegation:** find and reopen the person's own emails across conversations ([#397](https://github.com/SenteLabsAI/OpenExecutive/issues/397)) ([49ed3cc](https://github.com/SenteLabsAI/OpenExecutive/commit/49ed3cccc07f2b1bc9cdc600b43fa97d3fa25cb3))
+* **delegation:** leave approval cards for actions an email calls for ([#388](https://github.com/SenteLabsAI/OpenExecutive/issues/388)) ([44a1807](https://github.com/SenteLabsAI/OpenExecutive/commit/44a1807067ae8a0e3924639b6a947881fae2cbfe))
+* **delegation:** lock down only the turn that read the mail ([#385](https://github.com/SenteLabsAI/OpenExecutive/issues/385)) ([a794917](https://github.com/SenteLabsAI/OpenExecutive/commit/a794917b85e94cbaa88582e955b8ba057712c918))
+* **delegation:** read the speaker's own mailbox and attachments from chat ([#384](https://github.com/SenteLabsAI/OpenExecutive/issues/384)) ([5ae7674](https://github.com/SenteLabsAI/OpenExecutive/commit/5ae76741e0b9ffdb997130f6a10a45a1f3400b8f))
+* **memory:** let each person share their work style with the team ([#391](https://github.com/SenteLabsAI/OpenExecutive/issues/391)) ([dee0275](https://github.com/SenteLabsAI/OpenExecutive/commit/dee02752d8f84448a9c3771613410a7397ce847d))
+* **orchestrator:** add an In training mode to Take the lead ([#400](https://github.com/SenteLabsAI/OpenExecutive/issues/400)) ([57937ac](https://github.com/SenteLabsAI/OpenExecutive/commit/57937ac0a46beff20e8d698113458879934e60a3))
+* **scripts:** let the Executive build and keep its own tools ([#383](https://github.com/SenteLabsAI/OpenExecutive/issues/383)) ([5e4348d](https://github.com/SenteLabsAI/OpenExecutive/commit/5e4348dc8731380e9302b3a2ba0083d5671eaf99))
+* **workflows:** edit a saved workflow by conversation ([#380](https://github.com/SenteLabsAI/OpenExecutive/issues/380)) ([a4677ad](https://github.com/SenteLabsAI/OpenExecutive/commit/a4677addc3b8c784af8e28bd354d598f2da960d7))
+* **workflows:** run Python jobs on files and keep them as custom tools ([#386](https://github.com/SenteLabsAI/OpenExecutive/issues/386)) ([f7a759d](https://github.com/SenteLabsAI/OpenExecutive/commit/f7a759d6fa711924282dbf973fef5ccfe6eab0e3))
+
+
+### Fixed
+
+* **chat:** label a calendar delete through manage_event as a removal ([#395](https://github.com/SenteLabsAI/OpenExecutive/issues/395)) ([f060ee7](https://github.com/SenteLabsAI/OpenExecutive/commit/f060ee7bb2d003bdbaa1ad09fb18e152aed9d7f6))
+* **delegation:** let Drive, Docs and Sheets reads run after a mail read ([#396](https://github.com/SenteLabsAI/OpenExecutive/issues/396)) ([643287c](https://github.com/SenteLabsAI/OpenExecutive/commit/643287cdfb1e61c7d8bd6ea994be332a858ba593))
+* **deps:** bake the tool-search model with the fastembed the gateway runs ([#392](https://github.com/SenteLabsAI/OpenExecutive/issues/392)) ([96d5e3a](https://github.com/SenteLabsAI/OpenExecutive/commit/96d5e3acd60e9e2c3b9b6c8d0de05a1628464b9a))
+* **orchestrator:** send a message only to the principal without an approval card ([#393](https://github.com/SenteLabsAI/OpenExecutive/issues/393)) ([417771c](https://github.com/SenteLabsAI/OpenExecutive/commit/417771c20641009cce7f3123dd5f88bd1c987749))
+
+
+### Changed
+
+* **orchestrator:** cache the conversation history between messages ([#389](https://github.com/SenteLabsAI/OpenExecutive/issues/389)) ([2f9560b](https://github.com/SenteLabsAI/OpenExecutive/commit/2f9560b21c28795f9323cebc9eb71662453ed5cc))
+
 ## [0.5.2](https://github.com/SenteLabsAI/OpenExecutive/compare/v0.5.1...v0.5.2) (2026-10-06)
 
 
