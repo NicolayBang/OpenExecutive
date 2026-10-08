@@ -112,3 +112,11 @@ def test_the_stored_name_must_be_the_one_they_named(said: Any) -> None:
     people_registry.invalidate()
     said("add jamie as a contact")
     assert lockdown.mail_touched_withholds("upsert_person", {"person_id": pid, "full_name": "Jamie Rivera"})
+
+
+def test_everyday_words_the_speaker_typed_name_no_one(said: Any) -> None:
+    said("Find Priya's email and add Priya as a contact")
+    for name in ("Email Billing", "Contact Desk", "Add Find", "As Is"):
+        assert lockdown.mail_touched_withholds("upsert_person", _add(full_name=name)), name
+    assert not lockdown.mail_touched_withholds("upsert_person", _add(full_name="Priya Shah"))
+

@@ -151,8 +151,33 @@ _CONTACT_FIELDS = frozenset({
 _NAME_WORD = re.compile(r"[^\W\d_][\w\-]*", re.UNICODE)
 
 
+# Words a request to add someone is made of, and other everyday words: a name
+# made of these proves nothing ("add Email Billing as a contact" would match
+# "find her email and add her as a contact").
+_COMMON_WORDS = frozenset({
+    "a", "about", "add", "added", "address", "after", "again", "all", "also",
+    "am", "an", "and", "any", "are", "as", "ask", "at", "back", "be", "been",
+    "before", "but", "by", "call", "can", "card", "cc", "chat", "client",
+    "colleague", "company", "contact", "contacts", "could", "did", "do",
+    "does", "email", "emails", "find", "firm", "for", "from", "get", "give",
+    "had", "has", "have", "he", "her", "here", "hers", "him", "his", "how",
+    "i", "if", "in", "inbox", "info", "into", "is", "it", "its", "just",
+    "last", "let", "like", "list", "mail", "me", "message", "my", "name",
+    "new", "next", "no", "not", "note", "now", "of", "on", "one", "or", "our",
+    "out", "over", "people", "person", "please", "put", "reply", "roster",
+    "said", "save", "say", "see", "send", "sent", "she", "should", "so",
+    "some", "than", "thank", "thanks", "that", "the", "their", "them", "then",
+    "there", "they", "this", "to", "too", "up", "us", "was", "we", "what",
+    "when", "where", "which", "who", "will", "with", "would", "yes", "you",
+    "your",
+})
+
+
 def _name_words(name: str) -> set[str]:
-    return {w.lower() for w in _NAME_WORD.findall(name or "") if len(w) >= 2}
+    return {
+        w.lower() for w in _NAME_WORD.findall(name or "")
+        if len(w) >= 3 and w.lower() not in _COMMON_WORDS
+    }
 
 
 CARRIED_REFUSAL = (
