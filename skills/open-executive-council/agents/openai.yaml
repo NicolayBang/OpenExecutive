@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open Executive Council"
+  short_description: "Independent executive specialists running in Docker"
+  default_prompt: "Use $open-executive-council to review this business decision with the relevant specialist agents."

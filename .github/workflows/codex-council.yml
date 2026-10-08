@@ -1,0 +1,32 @@
+name: Codex Council
+
+on:
+  pull_request:
+    paths:
+      - skills/open-executive-council/**
+      - .github/workflows/codex-council.yml
+  push:
+    branches: [main]
+    paths:
+      - skills/open-executive-council/**
+      - .github/workflows/codex-council.yml
+
+permissions:
+  contents: read
+
+jobs:
+  council:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Test council lifecycle and result validation
+        run: python -m unittest discover -s skills/open-executive-council/tests -v
+      - name: Build pinned Codex runtime
+        run: python skills/open-executive-council/scripts/council.py build
+      - name: Check runtime executable without credentials
+        run: docker run --rm open-executive-council:0.154.0 --version
