@@ -13,10 +13,12 @@ runs in until the turn ends, only that stays shut: no outside fetch (a URL
 can carry what the mail said anywhere: ``read_document``, research, the
 watchlist, ``load_mcp_server``, any gateway tool but
 ``PRIVATE_TURN_MCP_TOOLS``), no script or library job (it can reach either),
-no workflow (it runs later, unattended, and may fetch or script), and no post
-to everyone (broadcasts, department messages, alerts). A roster change runs
-only for a contact the speaker named themselves (``speaker_named_contact``),
-since the roster is what the send checks trust.
+no workflow (it runs later, unattended, and may fetch or script), no post
+to everyone (broadcasts, department messages, alerts), and no change to who
+is on the roster or holds authority (archiving someone, a department head, a
+roster request), since every send and approval check trusts it. The one
+roster change that runs is a contact the speaker named themselves
+(``speaker_named_contact``).
 
 Every tool the Executive can be offered is classified here, in exactly one of
 ``MAIL_TOUCHED_ALLOWED_TOOLS`` or ``MAIL_TOUCHED_WITHHELD_TOOLS`` (a test fails
@@ -104,9 +106,6 @@ MAIL_TOUCHED_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "update_department_goal",
     "record_decision_outcome",
     "remove_watchlist_entry",
-    "archive_person",
-    "set_department_head",
-    "resolve_roster_request",
     # Only a contact the speaker named this turn (speaker_named_contact).
     "upsert_person",
     # Only PRIVATE_TURN_MCP_TOOLS: reads, and sends whose every recipient the
@@ -128,6 +127,12 @@ MAIL_TOUCHED_WITHHELD_TOOLS: frozenset[str] = frozenset({
     "suggest_workflow",
     "run_workflow",
     "save_workflow",
+    # Who is on the roster and who holds authority: every send and approval
+    # check trusts it, so mail must not change it (contacts the speaker names
+    # are the one exception, speaker_named_contact).
+    "archive_person",
+    "set_department_head",
+    "resolve_roster_request",
     # Posts to everyone, with no recipient to check.
     "send_department_message",
     "send_company_broadcast",
@@ -136,7 +141,8 @@ MAIL_TOUCHED_WITHHELD_TOOLS: frozenset[str] = frozenset({
 
 REFUSAL = (
     "This turn read the user's own mail, so until it ends nothing opens a link "
-    "or outside address, runs a script or workflow, or posts to everyone. "
+    "or outside address, runs a script or workflow, posts to everyone, or "
+    "changes who is on the roster or holds authority. "
     "Tell the user it can be done if they ask again in their next message. "
     "Do not retry it in this turn."
 )
@@ -182,9 +188,10 @@ def _name_words(name: str) -> set[str]:
 
 CARRIED_REFUSAL = (
     "This conversation read the user's own mail recently, so nothing here opens "
-    "a link or outside address, runs a script or workflow, or posts to everyone "
-    "yet. Tell the user it works in a new conversation, or here after about 20 "
-    "to 30 more of their messages. Do not retry it now."
+    "a link or outside address, runs a script or workflow, posts to everyone, or "
+    "changes who is on the roster or holds authority yet. Tell the user it "
+    "works in a new conversation, or here after about 20 to 30 more of their "
+    "messages. Do not retry it now."
 )
 
 

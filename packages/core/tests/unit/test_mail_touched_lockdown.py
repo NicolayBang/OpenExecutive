@@ -169,6 +169,7 @@ def test_only_links_scripts_workflows_and_posts_to_everyone_are_withheld() -> No
         "run_executive_research", "run_script", "run_python_job",
         "suggest_workflow", "run_workflow", "save_workflow",
         "send_department_message", "send_company_broadcast", "create_alert",
+        "archive_person", "set_department_head", "resolve_roster_request",
     } == lockdown.MAIL_TOUCHED_WITHHELD_TOOLS
     for tool in ("message_person", "send_slack_dm", "create_calendar_event", "schedule_followup",
                  "remember_fact", "remind_me", "update_company_profile", "create_goal"):
