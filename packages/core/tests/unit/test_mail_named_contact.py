@@ -120,3 +120,10 @@ def test_everyday_words_the_speaker_typed_name_no_one(said: Any) -> None:
         assert lockdown.mail_touched_withholds("upsert_person", _add(full_name=name)), name
     assert not lockdown.mail_touched_withholds("upsert_person", _add(full_name="Priya Shah"))
 
+
+
+def test_a_name_without_an_ask_to_add_anyone_is_refused(said: Any) -> None:
+    # "jamie" is typed, but nothing asks to change the roster.
+    said("reply to jamie about the invoice")
+    for withholds in BOTH:
+        assert withholds("upsert_person", _add(email="billing@evil.example"))

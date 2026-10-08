@@ -9257,7 +9257,8 @@ delegation:
     speaker's own words, and playbook changes are drafts a person approves.
     upsert_person runs only for a contact the speaker named this turn
     (lockdown.speaker_named_contact: kind contact, only name, role, email,
-    leave and response fields; a word of the name in their own words; on an
+    leave and response fields; a word of the name in their own words, in
+    a message that asks to add, save or change someone; on an
     update the stored name too, and a changed address must be one they
     typed), because the roster is what every send check trusts. What an
     email itself asks for (a meeting, a message, a new contact) is still
