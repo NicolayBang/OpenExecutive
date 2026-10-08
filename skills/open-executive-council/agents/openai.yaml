@@ -1,4 +1,4 @@
 interface:
   display_name: "Open Executive Council"
-  short_description: "Independent executive specialists running in Docker"
+  short_description: "Executive specialists using your existing Codex login"
   default_prompt: "Use $open-executive-council to review this business decision with the relevant specialist agents."
