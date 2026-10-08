@@ -421,10 +421,11 @@ def pin_turn_delegation(session: Any, speaker_text: str) -> TurnDelegation:
     return pinned
 
 
-def history_len(session: Any) -> int:
-    """How many history messages ``session`` holds now (0 when it has none)."""
+def history_len(session: Any) -> int | None:
+    """How many history messages ``session`` holds now, or None when that
+    can't be told (which keeps a carried lockdown in view)."""
     history = getattr(session, "conversation_history", None)
-    return len(history) if isinstance(history, list) else 0
+    return len(history) if isinstance(history, list) else None
 
 
 # A turn adds up to three history messages (its words, an added message, the
@@ -433,18 +434,18 @@ def history_len(session: Any) -> int:
 _TURN_SPAN = 2
 
 
-def mail_still_in_view(read_at: int | None, total: int) -> bool:
+def mail_still_in_view(read_at: int | None, total: int | None) -> bool:
     """Whether the turn that read the mail, stored as ``read_at`` history
     messages before it (``session_store.mail_read_at``), is still in what the
     model is shown of a ``total``-message history. Unknown counts as in view."""
     from openexecutive.orchestrator.session import history_window_start
 
-    if read_at is None:
+    if read_at is None or total is None:
         return True
     return history_window_start(total) <= read_at + _TURN_SPAN
 
 
-def _carry_kept_private(pinned: TurnDelegation, total: int = 0) -> None:
+def _carry_kept_private(pinned: TurnDelegation, total: int | None = None) -> None:
     """A conversation that once read someone's mail (``mark_mail_private``)
     stays theirs on every later turn: its rows are private to them and it
     teaches no memory, however it is answered (``touched_mail``). Nobody else

@@ -44,6 +44,10 @@ def test_the_carried_lock_lifts_once_the_reading_turn_is_out_of_view() -> None:
     assert not dsettings.mail_still_in_view(100, 180)
     # Unknown (a conversation marked before the column): always in view.
     assert dsettings.mail_still_in_view(None, 10_000)
+    # A history that can't be measured stores and reads as unknown too.
+    assert dsettings.history_len(object()) is None
+    assert dsettings.history_len(Session()) == 0
+    assert dsettings.mail_still_in_view(0, None)
 
 
 def test_mark_mail_private_stores_when_the_mail_was_read(db: Path) -> None:
