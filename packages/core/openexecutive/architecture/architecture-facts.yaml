@@ -9233,62 +9233,53 @@ delegation:
   lockdown: |
     Once a turn has read the principal's own mail — from the round that
     calls ghostwrite_email or a mailbox read (search_my_email,
-    read_my_email, read_my_email_attachment, my_email_awaiting_reply), since
-    a round's tools run
-    together — nothing that
-    reaches anyone else runs until the turn ends (delegation.lockdown): no
-    message, post, broadcast or invite, no queued or started work
-    (schedule_followup, suggest_workflow, run_workflow, save_workflow,
-    research), no fetch of an outside address (read_document,
-    load_mcp_server, the watchlist tools), and no write to state others or
-    later turns read (the roster, goals, skills, alerts, open loops,
-    decisions, standing facts, artifacts). Through MCP call_tool only the
-    Google Workspace reads stay — Gmail message and thread content, Gmail
-    search, calendar, and Drive, Docs and Sheets search and file reads, and
-    their Microsoft 365 twins, OneDrive file content included
-    (MAIL_TOUCHED_MCP_READS, a subset of PRIVATE_TURN_MCP_TOOLS). File reads
-    stay so "check my mail against the statements on the Drive" works in one
-    conversation: in the reading turn nothing they return can reach anyone,
-    and Drive reads are not remembered on such a turn
-    (drive_reads.may_remember). Accepted residual: opening a file someone
-    else owns registers a view in their file activity, so mail planted to
-    steer which shared file opens could signal a few bits per read; no file
-    content leaves. Every tool the Executive can be offered is in
-    exactly one of MAIL_TOUCHED_ALLOWED_TOOLS / MAIL_TOUCHED_WITHHELD_TOOLS
-    (a test fails on an unclassified one) and an unclassified name is
-    withheld. The dispatch guard in executive._stream_agent_loop refuses at
-    dispatch with a private tool_invocation row (details.refused
-    "mail_touched") and an error telling the model to offer it in a new
-    message; the offered list is unchanged, so the cached prefix is the same
-    all turn. Backstops fail closed in the send paths themselves
-    (schedule_tools._guard_outbound, which every DM and message_person goes
-    through; the broadcast, calendar, workflow, research and follow-up
-    handlers; MCPGateway.call_tool and load_mcp_server). The server-side
-    web_search stays, as on a turn private to the principal. The lockdown is
-    per turn (TurnDelegation.read_mail, set only by the tools that read the
-    mailbox or notes; lockdown.mail_touched_refusal reads
-    settings.turn_read_delegate_mail): the next message starts afresh, in a
+    read_my_email, read_my_email_attachment, my_email_awaiting_reply) or
+    recall_history, since a round's tools run together — only a door to the
+    open internet or to everyone stays shut until the turn ends
+    (delegation.lockdown, MAIL_TOUCHED_WITHHELD_TOOLS): outside fetches
+    (read_document, load_mcp_server, add/tune_watchlist_entry,
+    run_executive_research, any call_tool outside PRIVATE_TURN_MCP_TOOLS),
+    scripts and library jobs (run_script, run_python_job), workflows
+    (suggest_workflow, run_workflow, save_workflow: they run later,
+    unattended, and may fetch or script) and posts to everyone
+    (send_department_message, send_company_broadcast, create_alert). The
+    risk is prompt injection: anyone can put text in the inbox, and a URL
+    could carry what the mail said anywhere. Everything else runs, because
+    it is fenced on its own: DMs and message_person reach only the roster
+    (_guard_outbound), calendar invites name attendees by person id, the
+    Executive's Gmail / Outlook send through call_tool checks every
+    recipient against _roster_allow_set, follow-ups go through the same
+    checks when due, remember_fact and update_company_profile keep only the
+    speaker's own words, and playbook changes are drafts a person approves.
+    upsert_person runs only for a contact the speaker named this turn
+    (lockdown.speaker_named_contact: kind contact, only name, role, email,
+    leave and response fields; a word of the name in their own words; on an
+    update the stored name too, and a changed address must be one they
+    typed), because the roster is what every send check trusts. What an
+    email itself asks for (a meeting, a message, a new contact) is still
+    never done on its say-so: the persona sends it to propose_actions.
+    Every tool the Executive can be offered is in exactly one of
+    MAIL_TOUCHED_ALLOWED_TOOLS / MAIL_TOUCHED_WITHHELD_TOOLS (a test fails
+    on an unclassified one) and an unclassified name is withheld. The
+    dispatch guard in executive._stream_agent_loop refuses at dispatch with
+    a private tool_invocation row (details.refused "mail_touched") and an
+    error telling the model to offer it in the next message; the offered
+    list is unchanged, so the cached prefix is the same all turn. The
+    handlers that reach outside or post to everyone check again
+    (lockdown.outside_reach_refusal: research, read_document, the
+    watchlist, workflows, broadcasts, MCPGateway.call_tool and
+    load_mcp_server). Drive reads are not remembered on such a turn
+    (drive_reads.may_remember). The server-side web_search stays, as on a
+    turn private to the principal. The lockdown is per turn
+    (TurnDelegation.read_mail, set only by the tools that read the mailbox
+    or notes): the next message starts with nothing withheld, in a
     mail_private conversation too, which stays private (touched_mail) but
-    not locked. History (session.conversation_history, chat_messages) keeps
-    only the speaker's words and the Executive's final replies, never a
-    tool's result, so a later turn sees the mail only as the Executive's own
-    reply; the send paths' recipient checks still apply (_roster_allow_set
-    for email, calendar and Drive; the roster for DMs and message_person).
-    A later turn releases only lockdown.CARRIED_RELEASED_TOOLS (send_slack_dm,
-    send_discord_dm, send_telegram_message, message_person — roster-gated —
-    and create/cancel_calendar_event, create_instant_meeting — attendees by
-    person id) and, through call_tool, PRIVATE_TURN_MCP_TOOLS; everything
-    else the reading turn refuses stays off for the whole conversation, an
-    unclassified tool too (fail closed): fetches and scripts, broadcasts and
-    channel posts, queued work (follow-ups and workflows run later
-    unattended), and writes others or later turns read (facts, skills, the
-    profile, the roster, documents). Refused at dispatch (carried_withholds,
-    when touched_mail and not read_mail) and, for the tools that reach
-    outside or post to everyone, in the handler too
-    (lockdown.outside_reach_refusal): a reply can repeat text the
-    mail planted, and a URL could carry it anywhere. The process log
-    names a refused call_tool's inner tool only when it is shaped like a
-    tool name (executive._loggable_tool, [a-z0-9_]{1,64}), else
+    not locked. History keeps only the speaker's words and the Executive's
+    final replies, never a tool's result. Until 2026-10 a later turn kept a
+    narrower lock for the whole conversation, which in a chat app (a
+    Telegram chat never ends) meant for ever; it was removed. The process
+    log names a refused call_tool's inner tool only when it is shaped like
+    a tool name (executive._loggable_tool, [a-z0-9_]{1,64}), else
     "call_tool:<unlisted>": that name is the model's own text, which mail
     could steer, and the log is not private (the audit row keeps it). The
     same goes for a turn private to the principal.

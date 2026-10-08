@@ -92,8 +92,8 @@ class TurnDelegation:
     # that once read them (``_carry_kept_private``).
     touched_mail: bool = False
     # This turn itself read their mailbox or notes (set before the read, with
-    # ``touched_mail``): nothing that reaches anyone else runs for the rest of
-    # it (``delegation.lockdown``). Never carried into the next turn: what
+    # ``touched_mail``): nothing that opens a link, runs a script or workflow,
+    # or posts to everyone runs for the rest of it (``delegation.lockdown``). Never carried into the next turn: what
     # the mail said reaches a later turn only as the Executive's own reply.
     read_mail: bool = False
     # Drafts made this turn, against the per-turn cap.

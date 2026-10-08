@@ -13,7 +13,8 @@ so they are fenced the same way:
 - **Private.** Before the first read each marks the turn as having read the
   owner's mail (``TurnDelegation.touched_mail`` and ``read_mail``): its audit rows are private,
   it teaches no memory, the conversation is theirs alone, and nothing that
-  reaches anyone else runs for the rest of the turn (``delegation.lockdown``).
+  opens a link, runs a script or workflow, or posts to everyone runs for the rest
+  of the turn (``delegation.lockdown``).
 - **Read-only.** Nothing is changed, labelled, drafted or sent.
 - **Capped per turn**: ``SEARCHES_PER_TURN`` searches, ``THREADS_PER_TURN``
   thread reads and ``ATTACHMENTS_PER_TURN`` attachment reads, each slot taken
