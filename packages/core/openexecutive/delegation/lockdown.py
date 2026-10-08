@@ -82,8 +82,6 @@ MAIL_TOUCHED_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "create_calendar_event",
     "create_instant_meeting",
     "cancel_calendar_event",
-    # A follow-up sends to the same roster checks when it is due.
-    "schedule_followup",
     # A reminder to the speaker alone, as fixed text with no links.
     "remind_me",
     # Cards and drafts a person approves before anything happens.
@@ -102,9 +100,6 @@ MAIL_TOUCHED_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "ack_alert",
     "assign_open_loop",
     "close_open_loop",
-    "create_goal",
-    "update_department_goal",
-    "record_decision_outcome",
     "remove_watchlist_entry",
     # Only a contact the speaker named this turn (speaker_named_contact).
     "upsert_person",
@@ -133,6 +128,13 @@ MAIL_TOUCHED_WITHHELD_TOOLS: frozenset[str] = frozenset({
     "archive_person",
     "set_department_head",
     "resolve_roster_request",
+    # Text that steers later turns: a follow-up's intent runs unattended as
+    # a prompt when it is due, and goals and decision outcomes are shown to
+    # every later turn. Mail must not write either.
+    "schedule_followup",
+    "create_goal",
+    "update_department_goal",
+    "record_decision_outcome",
     # Posts to everyone, with no recipient to check.
     "send_department_message",
     "send_company_broadcast",
@@ -141,8 +143,9 @@ MAIL_TOUCHED_WITHHELD_TOOLS: frozenset[str] = frozenset({
 
 REFUSAL = (
     "This turn read the user's own mail, so until it ends nothing opens a link "
-    "or outside address, runs a script or workflow, posts to everyone, or "
-    "changes who is on the roster or holds authority. "
+    "or outside address, runs a script or workflow, posts to everyone, sets "
+    "a follow-up, goal or decision outcome, or changes who is on the roster or "
+    "holds authority. "
     "Tell the user it can be done if they ask again in their next message. "
     "Do not retry it in this turn."
 )
@@ -188,8 +191,9 @@ def _name_words(name: str) -> set[str]:
 
 CARRIED_REFUSAL = (
     "This conversation read the user's own mail recently, so nothing here opens "
-    "a link or outside address, runs a script or workflow, posts to everyone, or "
-    "changes who is on the roster or holds authority yet. Tell the user it "
+    "a link or outside address, runs a script or workflow, posts to everyone, sets a "
+    "follow-up, goal or decision outcome, or changes who is on the roster or "
+    "holds authority yet. Tell the user it "
     "works in a new conversation, or here after about 20 to 30 more of their "
     "messages. Do not retry it now."
 )

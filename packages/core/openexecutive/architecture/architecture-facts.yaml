@@ -9244,14 +9244,16 @@ delegation:
     unattended, and may fetch or script), posts to everyone
     (send_department_message, send_company_broadcast, create_alert) and
     changes to who is on the roster or holds authority (archive_person,
-    set_department_head, resolve_roster_request). The
+    set_department_head, resolve_roster_request), and text that steers
+    later turns (schedule_followup, whose intent runs unattended as a
+    prompt when due; create_goal, update_department_goal and
+    record_decision_outcome, shown to every later turn). The
     risk is prompt injection: anyone can put text in the inbox, and a URL
     could carry what the mail said anywhere. Everything else runs, because
     it is fenced on its own: DMs and message_person reach only the roster
     (_guard_outbound), calendar invites name attendees by person id, the
     Executive's Gmail / Outlook send through call_tool checks every
-    recipient against _roster_allow_set, follow-ups go through the same
-    checks when due, remember_fact and update_company_profile keep only the
+    recipient against _roster_allow_set, remember_fact and update_company_profile keep only the
     speaker's own words, and playbook changes are drafts a person approves.
     upsert_person runs only for a contact the speaker named this turn
     (lockdown.speaker_named_contact: kind contact, only name, role, email,

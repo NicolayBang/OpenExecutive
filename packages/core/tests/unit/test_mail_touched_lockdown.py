@@ -163,16 +163,18 @@ def test_call_tool_runs_only_reads_and_recipient_checked_sends() -> None:
     assert not lockdown.mail_touched_withholds("ghostwrite_email", {})
 
 
-def test_only_links_scripts_workflows_and_posts_to_everyone_are_withheld() -> None:
+def test_only_links_scripts_workflows_posts_and_lasting_text_are_withheld() -> None:
     assert {
         "read_document", "load_mcp_server", "add_watchlist_entry", "tune_watchlist_entry",
         "run_executive_research", "run_script", "run_python_job",
         "suggest_workflow", "run_workflow", "save_workflow",
         "send_department_message", "send_company_broadcast", "create_alert",
         "archive_person", "set_department_head", "resolve_roster_request",
+        "schedule_followup", "create_goal", "update_department_goal",
+        "record_decision_outcome",
     } == lockdown.MAIL_TOUCHED_WITHHELD_TOOLS
-    for tool in ("message_person", "send_slack_dm", "create_calendar_event", "schedule_followup",
-                 "remember_fact", "remind_me", "update_company_profile", "create_goal"):
+    for tool in ("message_person", "send_slack_dm", "create_calendar_event",
+                 "remember_fact", "remind_me", "update_company_profile"):
         assert not lockdown.mail_touched_withholds(tool, {}), tool
 
 
@@ -313,12 +315,14 @@ def test_the_outside_handlers_refuse_on_their_own() -> None:
     token = current_session.set(session)
     try:
         assert lockdown.outside_reach_refusal("run_workflow") is not None
-        assert lockdown.outside_reach_refusal("schedule_followup") is None
+        assert lockdown.outside_reach_refusal("schedule_followup") is not None
+        assert lockdown.outside_reach_refusal("message_person") is None
         session.turn_delegation.read_mail = False  # type: ignore[attr-defined]
         # A later turn holds the same while the reading turn is in view...
         session.turn_delegation.mail_in_view = True  # type: ignore[attr-defined]
         assert "20 to 30" in (lockdown.outside_reach_refusal("run_workflow") or "")
-        assert lockdown.outside_reach_refusal("schedule_followup") is None
+        assert "20 to 30" in (lockdown.outside_reach_refusal("schedule_followup") or "")
+        assert lockdown.outside_reach_refusal("message_person") is None
         # ...and refuses nothing once it is out of view.
         session.turn_delegation.mail_in_view = False  # type: ignore[attr-defined]
         assert lockdown.outside_reach_refusal("run_workflow") is None
