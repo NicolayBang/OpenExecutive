@@ -28,11 +28,15 @@ turn), and treats a round that calls any of them as already touched,
 because a round's tools run concurrently. The handlers that reach outside
 check again (``outside_reach_refusal``). The server-side ``web_search``
 stays, as on a turn private to the owner: it cannot be refused at dispatch
-without a cache miss. The lockdown lasts for the turn
-(``TurnDelegation.read_mail``); the owner's next message starts afresh, even
-in a conversation that read their mail: it stays private to them
-(``touched_mail``), and history carries only their words and the Executive's
-replies, never the mail a tool returned.
+without a cache miss. The full lockdown lasts for the turn
+(``TurnDelegation.read_mail``). A later turn of that conversation stays private
+to its owner (``touched_mail``), and its history carries only their words and
+the Executive's replies, never the mail a tool returned. A reply can still
+repeat a link the mail planted, so the same tools stay withheld on later turns
+while the reading turn is in the history the model is shown
+(``TurnDelegation.mail_in_view``, ``carried_withholds``). A chat app's
+conversation never ends, so that hold lifts once the reading turn scrolls out
+of view, some 20 to 30 messages later, rather than lasting forever.
 """
 from __future__ import annotations
 
@@ -151,6 +155,14 @@ def _name_words(name: str) -> set[str]:
     return {w.lower() for w in _NAME_WORD.findall(name or "") if len(w) >= 2}
 
 
+CARRIED_REFUSAL = (
+    "This conversation read the user's own mail recently, so nothing here opens "
+    "a link or outside address, runs a script or workflow, or posts to everyone "
+    "yet. Tell the user it works in a new conversation, or here after about 20 "
+    "to 30 more of their messages. Do not retry it now."
+)
+
+
 def speaker_named_contact(tool_input: Any) -> bool:
     """Whether an ``upsert_person`` call on a turn that read the owner's
     mail is one they asked for themselves: a contact (new, or already one),
@@ -206,17 +218,34 @@ def mail_touched_withholds(tool_name: str, tool_input: Any) -> bool:
     return tool_name not in MAIL_TOUCHED_ALLOWED_TOOLS
 
 
+def carried_withholds(tool_name: str, tool_input: Any) -> bool:
+    """Whether a call to ``tool_name`` is refused on a later turn of a
+    conversation whose mail-reading turn is still in view: the same tools as
+    on the reading turn (fail closed)."""
+    return mail_touched_withholds(tool_name, tool_input)
+
+
+def carried_withheld_error(label: str) -> str:
+    return json.dumps({"error": f"{label} was not run. {CARRIED_REFUSAL}"})
+
+
 def outside_reach_refusal(label: str, tool_input: Any = None, tool_name: str = "") -> str | None:
     """For a handler that can reach an outside address: the refusal when this
-    turn read the owner's mail, else None. ``tool_name`` and ``tool_input``
-    (for ``call_tool``) narrow it to what ``mail_touched_withholds`` refuses;
-    by default ``label`` is the tool. Never raises; fails closed."""
-    from openexecutive.delegation.settings import turn_read_delegate_mail
+    turn read the owner's mail, or runs in a conversation whose reading turn
+    is still in view, else None. ``tool_name`` and ``tool_input`` (for
+    ``call_tool``) narrow it to what ``mail_touched_withholds`` refuses; by
+    default ``label`` is the tool. Never raises; fails closed."""
+    from openexecutive.delegation.settings import (
+        turn_carries_mail_lock,
+        turn_read_delegate_mail,
+    )
 
     name = tool_name or label
     try:
-        if turn_read_delegate_mail() and mail_touched_withholds(name, tool_input):
-            return mail_touched_withheld_error(label)
+        if turn_read_delegate_mail():
+            return mail_touched_withheld_error(label) if mail_touched_withholds(name, tool_input) else None
+        if turn_carries_mail_lock():
+            return carried_withheld_error(label) if carried_withholds(name, tool_input) else None
         return None
     except Exception:
         return mail_touched_withheld_error(label)

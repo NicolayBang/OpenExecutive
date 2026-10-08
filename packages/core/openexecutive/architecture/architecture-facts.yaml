@@ -9272,12 +9272,19 @@ delegation:
     (drive_reads.may_remember). The server-side web_search stays, as on a
     turn private to the principal. The lockdown is per turn
     (TurnDelegation.read_mail, set only by the tools that read the mailbox
-    or notes): the next message starts with nothing withheld, in a
-    mail_private conversation too, which stays private (touched_mail) but
-    not locked. History keeps only the speaker's words and the Executive's
-    final replies, never a tool's result. Until 2026-10 a later turn kept a
-    narrower lock for the whole conversation, which in a chat app (a
-    Telegram chat never ends) meant for ever; it was removed. The process
+    or notes): the next message starts afresh, in a mail_private
+    conversation too, which stays private (touched_mail) but not fully
+    locked. History keeps only the speaker's words and the
+    Executive's final replies, never a tool's result, but a reply can repeat
+    a link the mail planted, so a later turn withholds the same tools
+    (lockdown.carried_withholds, CARRIED_REFUSAL) while the reading turn is
+    still in the history the model is shown (TurnDelegation.mail_in_view:
+    sessions.mail_read_at, the history length mark_mail_private stores before
+    the reading turn, against session.history_window_start; NULL counts as
+    in view). A chat app's conversation (a Telegram chat) never ends, so the
+    hold lifts some 20 to 30 messages later rather than lasting for ever.
+    Accepted residual: a later reply that repeats the planted link keeps it
+    in view past that point. The process
     log names a refused call_tool's inner tool only when it is shaped like
     a tool name (executive._loggable_tool, [a-z0-9_]{1,64}), else
     "call_tool:<unlisted>": that name is the model's own text, which mail

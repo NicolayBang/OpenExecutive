@@ -472,6 +472,16 @@ def initialize_db(db_path: Path | None = None) -> None:
             except sqlite3.OperationalError as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise
+        # How many history messages the conversation held when a turn last
+        # read that mail: the lockdown is carried only while that turn is in
+        # the model's view (session_store.mail_read_at). NULL = unknown, so it
+        # is always carried.
+        if "mail_read_at" not in _sessions_existing:
+            try:
+                conn.execute("ALTER TABLE sessions ADD COLUMN mail_read_at INTEGER")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
         # Trust-ledger tables (first-climb autonomy, Build 1+2).
         # `decision_instances` is the correlation unit: links a proposal, its
